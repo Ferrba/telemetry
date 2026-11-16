@@ -69,6 +69,7 @@ while true; do
 
     # 2. Executa Pings Contínuos em Paralelo (1 Hz durante ~50 segundos)
     echo "Disparando ICMP contínuo (50 segundos de fluxo nos 2 alvos)..."
+    rm -f "$TMP_P1" "$TMP_P2"
     if [ "$(id -u)" -eq 0 ]; then
         ping -c $PING_COUNT -i 1 -W 1 -I rmnet0 ${TARGETS[0]} > "$TMP_P1" 2>&1 &
         PID1=$!
@@ -95,14 +96,14 @@ while true; do
             FILE="$TMP_P2"
         fi
 
-        # Extrai contagem transmitida e recebida
-        TX=$(grep -oE '[0-9]+ packets transmitted' "$FILE" | grep -oE '^[0-9]+')
-        RX=$(grep -oE '[0-9]+ received' "$FILE" | grep -oE '^[0-9]+')
+        # Extrai contagem transmitida e recebida de forma segura
+        TX=$(grep -oE '[0-9]+ packets transmitted' "$FILE" 2>/dev/null | grep -oE '^[0-9]+' | tail -n 1 | tr -d '\r\n ')
+        RX=$(grep -oE '[0-9]+ received' "$FILE" 2>/dev/null | grep -oE '^[0-9]+' | tail -n 1 | tr -d '\r\n ')
         [ -z "$TX" ] && TX="$PING_COUNT"
         [ -z "$RX" ] && RX="0"
 
         # Extrai todos os RTTs individuais como lista [54.2, 55.1, ...]
-        RTTS_LIST=$(grep "time=" "$FILE" | sed -n 's/.*time=\([0-9.]*\).*/\1/p' | tr '\n' ',' | sed 's/,$//')
+        RTTS_LIST=$(grep "time=" "$FILE" 2>/dev/null | sed -n 's/.*time=\([0-9.]*\).*/\1/p' | tr '\n' ',' | sed 's/,$//')
 
         echo "  [Alvo $TGT]: Transmitidos=$TX | Recebidos=$RX | Leituras brutas coletadas."
 
