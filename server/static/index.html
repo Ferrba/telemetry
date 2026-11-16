@@ -7,16 +7,13 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/static/styles.css">
-  <!-- Chart.js via CDN -->
+  <link rel="stylesheet" href="/static/styles.css?v=3.0.0">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-  <!-- Leaflet CSS & JS for Interactive Map -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 </head>
 <body>
   <div class="dashboard-container">
-    <!-- Header -->
     <header class="dashboard-header">
       <div class="header-left">
         <div class="brand-logo">
@@ -30,9 +27,9 @@
       <div class="header-right">
         <div class="device-pill">
           <span class="device-icon">&#128241;</span>
-          <span id="device-model">samsung SM-G973F</span>
-          <span class="carrier-tag" id="carrier-tag">VIRTUEYES</span>
-          <span class="tech-tag badge-purple" id="val-tech-header">LTE+ (4.5G)</span>
+          <span id="device-id">--</span>
+          <span class="carrier-tag" id="carrier-tag">--</span>
+          <span class="tech-tag badge-purple" id="tech-header">--</span>
         </div>
         <div class="status-indicator" id="status-indicator">
           <span class="pulse-dot"></span>
@@ -44,190 +41,186 @@
       </div>
     </header>
 
-    <!-- Top KPI Cards Grid -->
     <section class="kpi-grid">
-      <!-- Card 1: Latência Média -->
-      <div class="kpi-card" id="card-latency">
+      <div class="kpi-card">
         <div class="kpi-header">
-          <span class="kpi-label">LATÊNCIA MÉDIA (PING)</span>
-          <span class="kpi-badge badge-green" id="loss-badge">0% perda</span>
+          <span class="kpi-label">LATÊNCIA (ÚLTIMO MINUTO)</span>
+          <span class="kpi-badge badge-green" id="lat-status">--</span>
         </div>
         <div class="kpi-value-container">
-          <span class="kpi-value" id="val-latency">--</span>
+          <span class="kpi-value" id="lat-main">--</span>
           <span class="kpi-unit">ms</span>
         </div>
-        <div class="kpi-footer">
-          <span>Alvo: <strong id="val-target">8.8.8.8</strong> | Jitter: <strong id="val-jitter">-- ms</strong></span>
-        </div>
+        <div class="kpi-footer target-rows" id="lat-rows">--</div>
       </div>
 
-      <!-- Card 2: Potência de Sinal (RSRP) & Tecnologia -->
-      <div class="kpi-card" id="card-rsrp">
+      <div class="kpi-card">
         <div class="kpi-header">
-          <span class="kpi-label">SINAL & TECNOLOGIA</span>
-          <span class="kpi-badge badge-blue" id="rsrp-quality">Excelente</span>
+          <span class="kpi-label">SINAL &amp; TECNOLOGIA</span>
+          <span class="kpi-badge badge-blue" id="rsrp-quality">--</span>
         </div>
         <div class="kpi-value-container">
-          <span class="kpi-value" id="val-rsrp">--</span>
+          <span class="kpi-value" id="rsrp">--</span>
           <span class="kpi-unit">dBm</span>
         </div>
         <div class="kpi-footer">
-          <span>Modo: <strong id="val-tech-card">LTE+ (4.5G)</strong> | Banda: <strong id="val-band">B28 (700 MHz)</strong></span>
+          RSRQ <strong id="rsrq">--</strong> · SNR <strong id="rssnr">--</strong><br>
+          <strong id="tech-card">--</strong> · <strong id="band">--</strong> · PCI <strong id="pci">--</strong>
         </div>
       </div>
 
-      <!-- Card 3: Distância da Torre (Timing Advance) & GPS -->
-      <div class="kpi-card" id="card-ta">
+      <div class="kpi-card">
         <div class="kpi-header">
           <span class="kpi-label">DISTÂNCIA DA TORRE (TA)</span>
-          <span class="kpi-badge badge-purple" id="ta-badge">TA = 8</span>
+          <span class="kpi-badge badge-purple" id="ta-badge">TA --</span>
         </div>
         <div class="kpi-value-container">
-          <span class="kpi-value" id="val-distance">--</span>
+          <span class="kpi-value" id="distance">--</span>
           <span class="kpi-unit">m</span>
         </div>
         <div class="kpi-footer">
-          <span>PCI: <strong id="val-pci">--</strong> | GPS: <strong id="val-gps-coords">-29.7115, -51.1230</strong></span>
+          Leitura de rádio: <strong id="radio-age">--</strong>
         </div>
       </div>
 
-      <!-- Card 4: IP Público & Gateway -->
-      <div class="kpi-card" id="card-ip">
+      <div class="kpi-card">
         <div class="kpi-header">
           <span class="kpi-label">IP PÚBLICO (SAÍDA DE TRÁFEGO)</span>
-          <span class="kpi-badge badge-cyan" id="ip-badge">Egress Ativo</span>
+          <span class="kpi-badge badge-cyan" id="ip-badge">--</span>
         </div>
         <div class="kpi-value-container">
-          <span class="kpi-value ip-text" id="val-public-ip">--</span>
+          <span class="kpi-value ip-text" id="ip-public">--</span>
         </div>
         <div class="kpi-footer">
-          <span>IP Móvel (rmnet0): <strong id="val-local-ip">--</strong></span>
+          IP móvel (<span id="iface">rmnet0</span>): <strong id="ip-local">--</strong><br>
+          IPs públicos em 24h: <strong id="ip-count">--</strong>
         </div>
       </div>
 
-      <!-- Card 5: Saúde do Dispositivo -->
-      <div class="kpi-card" id="card-hw">
+      <div class="kpi-card">
         <div class="kpi-header">
-          <span class="kpi-label">TEMPERATURA & BATERIA</span>
-          <span class="kpi-badge badge-yellow" id="batt-badge">100%</span>
+          <span class="kpi-label">TEMPERATURA &amp; BATERIA</span>
+          <span class="kpi-badge badge-yellow" id="batt-badge">--</span>
         </div>
         <div class="kpi-value-container">
-          <span class="kpi-value" id="val-temp">--</span>
+          <span class="kpi-value" id="temp">--</span>
           <span class="kpi-unit">°C</span>
         </div>
         <div class="kpi-footer">
-          <span>Tensão: <strong id="val-volt">-- V</strong></span>
+          Tensão: <strong id="volt">--</strong> · <strong id="charging">--</strong>
         </div>
       </div>
     </section>
 
-    <!-- Visualizations Grid (Gráficos + Mapa na Mesma Tela) -->
+    <div class="range-bar">
+      <span class="range-label">Período dos gráficos:</span>
+      <button class="range-btn" data-range="live">Ao vivo (10 min, 1/s)</button>
+      <button class="range-btn active" data-range="60">1 h</button>
+      <button class="range-btn" data-range="360">6 h</button>
+      <button class="range-btn" data-range="1440">24 h</button>
+    </div>
+
     <section class="charts-grid">
-      <!-- Painel 1: Latência ao Longo do Tempo (Gráfico) -->
       <div class="chart-card">
         <div class="chart-header">
           <div class="chart-title-group">
             <h3>Histórico de Latência de Enlace (RTT)</h3>
-            <span class="chart-desc">Tempo de resposta medido a cada ciclo de teste</span>
+            <span class="chart-desc" id="latency-desc">Média por minuto, por alvo</span>
           </div>
-          <div class="chart-filters">
-            <span class="target-legend legend-target-1">8.8.8.8 (Google)</span>
-            <span class="target-legend legend-target-2">172.31.128.53 (AWS)</span>
-          </div>
+          <div class="chart-filters" id="latency-legend"></div>
         </div>
         <div class="chart-body">
           <canvas id="latencyChart"></canvas>
+          <div class="chart-empty" id="latency-empty">Sem amostras de ping no período</div>
         </div>
       </div>
 
-      <!-- Painel 2: Mapa de Georreferenciamento & Cobertura (Direto na Tela) -->
       <div class="chart-card map-card">
         <div class="chart-header">
           <div class="chart-title-group">
-            <h3>Georreferenciamento & Cobertura da Célula</h3>
-            <span class="chart-desc">Posição geográfica GPS em tempo real e raio da torre</span>
+            <h3>Georreferenciamento &amp; Cobertura da Célula</h3>
+            <span class="chart-desc">Última posição conhecida e raio estimado pelo Timing Advance</span>
           </div>
           <div class="chart-filters">
-            <span class="kpi-badge badge-purple" id="inline-map-tech">LTE+ (4.5G)</span>
-            <span class="kpi-badge badge-cyan" id="inline-map-acc">±100m</span>
+            <span class="kpi-badge badge-purple" id="gps-provider">--</span>
+            <span class="kpi-badge badge-cyan" id="gps-acc">--</span>
           </div>
         </div>
         <div class="chart-body map-chart-body">
           <div id="inline-map-canvas" class="inline-map-view"></div>
           <div class="inline-map-bar">
-            <span>Lat, Lon: <strong id="inline-map-coords">-29.71147, -51.12301</strong></span>
-            <span>Raio da Torre (TA): <strong id="inline-map-ta">~624m</strong></span>
+            <span>Lat, Lon: <strong id="gps-coords">--</strong></span>
+            <span>Fix: <strong id="gps-age">--</strong></span>
+            <span>Raio TA: <strong id="gps-ta">--</strong></span>
           </div>
         </div>
       </div>
 
-      <!-- Painel 3: Radiofrequência (RSRP vs RSRQ) -->
       <div class="chart-card">
         <div class="chart-header">
           <div class="chart-title-group">
-            <h3>Qualidade de Radiofrequência (RSRP / RSRQ)</h3>
-            <span class="chart-desc">Potência do sinal de referência e qualidade</span>
+            <h3>Qualidade de Radiofrequência (RSRP / RSRQ / SNR)</h3>
+            <span class="chart-desc">Leituras a cada 5 segundos</span>
           </div>
         </div>
         <div class="chart-body">
           <canvas id="rfChart"></canvas>
+          <div class="chart-empty" id="rf-empty">Sem leituras de rádio no período</div>
         </div>
       </div>
 
-      <!-- Painel 4: Deslocamento / Distância Estimada da Torre -->
       <div class="chart-card">
         <div class="chart-header">
           <div class="chart-title-group">
-            <h3>Distância da Antena & Timing Advance</h3>
-            <span class="chart-desc">Estimativa de distância linear em metros (3GPP Rel 15)</span>
+            <h3>Eventos de Rede</h3>
+            <span class="chart-desc">Trocas de IP público/local e troca de célula (handover) no período</span>
           </div>
         </div>
-        <div class="chart-body">
-          <canvas id="distanceChart"></canvas>
+        <div class="chart-body events-body">
+          <ul class="events-list" id="events-list">
+            <li class="event-empty">Nenhum evento no período</li>
+          </ul>
         </div>
       </div>
     </section>
 
-    <!-- Live Telemetry Data Table -->
     <section class="table-section">
       <div class="table-header">
-        <h3>Últimas Amostragens de Telemetria</h3>
-        <span class="auto-refresh-tag">Atualização automática ativa (3s)</span>
+        <h3>Resumo por Minuto (latência cruzada com rádio e rede)</h3>
+        <span class="auto-refresh-tag">Últimos 15 minutos · atualiza a cada 15s</span>
       </div>
       <div class="table-wrapper">
         <table class="data-table">
           <thead>
             <tr>
-              <th>Timestamp</th>
-              <th>Alvo (IP)</th>
-              <th>Tecnologia</th>
-              <th>Latência (Méd / Jitter)</th>
-              <th>Perda (TX/RX)</th>
+              <th>Minuto</th>
+              <th>Alvo</th>
+              <th>Latência méd (mín–máx)</th>
+              <th>Jitter</th>
+              <th>Perda</th>
               <th>Status</th>
-              <th>RSRP</th>
+              <th>RSRP méd / mín</th>
               <th>RSRQ</th>
+              <th>Célula (PCI)</th>
               <th>Banda</th>
-              <th>Distância (TA)</th>
-              <th>IP Público (Saída)</th>
-              <th>IP Móvel (rmnet0)</th>
+              <th>Distância</th>
+              <th>IP público</th>
+              <th>IP móvel</th>
             </tr>
           </thead>
-          <tbody id="telemetry-table-body">
-            <tr>
-              <td colspan="12" class="empty-row">Aguardando primeira transmissão do celular...</td>
-            </tr>
+          <tbody id="table-body">
+            <tr><td colspan="13" class="empty-row">Aguardando o primeiro lote do celular...</td></tr>
           </tbody>
         </table>
       </div>
     </section>
 
-    <!-- Footer -->
     <footer class="dashboard-footer">
-      <p>CellDiag Telemetry Hub v2.2 | Samsung Galaxy S10 (beyond1) &bull; Termux Agent</p>
-      <p class="server-status">Endpoint API: <code>/api/telemetry</code> &bull; Banco SQLite Local &bull; Georreferenciamento Integrado</p>
+      <p>CellDiag Telemetry Hub v3 · agente <span id="agent-version">--</span></p>
+      <p class="server-status">Relógio celular × servidor: <code id="clock-skew">--</code> · Ingestão: <code>/api/v3/ingest</code></p>
     </footer>
   </div>
 
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=3.0.0"></script>
 </body>
 </html>

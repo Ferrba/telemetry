@@ -491,3 +491,107 @@ body {
 .inline-map-bar strong {
   color: var(--accent-cyan);
 }
+
+/* ==========================================================================
+   v3: seletor de periodo, legenda dinamica, eventos, estados vazios
+   ========================================================================== */
+.range-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.range-label {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-right: 4px;
+}
+
+.range-btn {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 6px 12px;
+  border-radius: 16px;
+  cursor: pointer;
+  transition: border-color 0.2s ease, color 0.2s ease;
+}
+
+.range-btn:hover { border-color: var(--border-focus); color: var(--text-primary); }
+.range-btn.active { border-color: var(--accent-cyan); color: var(--accent-cyan); background: rgba(6, 182, 212, 0.08); }
+
+.legend-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+}
+
+.chart-empty {
+  position: absolute;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.chart-empty.show { display: flex; }
+
+.target-rows {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.7;
+}
+
+.target-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.target-row .t-name { color: var(--text-secondary); }
+.target-row .t-val { color: var(--text-primary); }
+
+.events-body {
+  overflow-y: auto;
+}
+
+.events-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.events-list li {
+  display: grid;
+  grid-template-columns: 92px 150px 1fr;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-family: var(--font-mono);
+}
+
+.events-list li .ev-time { color: var(--text-muted); }
+.events-list li .ev-detail { color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; }
+
+.events-list li.event-empty {
+  display: block;
+  border: none;
+  color: var(--text-muted);
+  text-align: center;
+  padding: 40px 0;
+  font-family: var(--font-sans);
+}
+
+.muted { color: var(--text-muted); }
+.stale { color: var(--accent-yellow) !important; }

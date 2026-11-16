@@ -1,461 +1,719 @@
-import sqlite3
-import os
+"""
+CellDiag Telemetry Hub - v3
+
+Modelo: o celular so registra amostras brutas, cada uma com seu proprio horario
+(epoch UTC), e envia um lote a cada 60s. Toda a analise (media, jitter, perda,
+SLA, banda, distancia, trocas de IP, handover) e feita aqui, no momento da
+consulta, a partir das amostras brutas.
+"""
 import json
-from datetime import datetime
-from typing import List, Optional, Dict, Any
-from fastapi import FastAPI, HTTPException, Query
+import math
+import os
+import sqlite3
+import time
+from collections import defaultdict
+from typing import Any, Dict, List, Optional
+
+from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "telemetry.db")
-STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.environ.get("CELLDIAG_DB", os.path.join(BASE_DIR, "telemetry.db"))
+STATIC_DIR = os.path.join(BASE_DIR, "static")
+VERSION = "3.0.0"
 
-app = FastAPI(title="CellDiag Telemetry Hub", version="2.1.0")
+# Valor que o Android usa para "campo indisponivel"
+ANDROID_INVALID = 2147483647
+# Distancia por unidade de Timing Advance no LTE (16 Ts * c / 2)
+TA_METERS = 78.12
 
+app = FastAPI(title="CellDiag Telemetry Hub", version=VERSION)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("PRAGMA journal_mode=WAL;")
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS telemetry_records (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        timestamp TEXT NOT NULL,
-        device_id TEXT,
-        ip_publico TEXT,
-        ip_local TEXT,
-        ip_changed INTEGER DEFAULT 0,
-        target TEXT NOT NULL,
-        latency_avg REAL,
-        latency_min REAL,
-        latency_max REAL,
-        jitter REAL DEFAULT 0.0,
-        loss_pct REAL,
-        status TEXT,
-        packets_transmitted INTEGER DEFAULT 0,
-        packets_received INTEGER DEFAULT 0,
-        raw_samples TEXT,
-        rsrp INTEGER,
-        rsrq INTEGER,
-        rssnr INTEGER,
-        band TEXT,
-        pci INTEGER,
-        tac TEXT,
-        ta INTEGER,
-        distance_m INTEGER,
-        cqi INTEGER,
-        dl_kbs INTEGER DEFAULT 0,
-        ul_kbs INTEGER DEFAULT 0,
-        total_rx_mb INTEGER DEFAULT 0,
-        total_tx_mb INTEGER DEFAULT 0,
-        battery_pct INTEGER,
-        temp_c REAL,
-        voltage_v REAL,
-        lat REAL,
-        lon REAL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
-    """)
 
-    # Tabela dedicada de Auditoria de Trocas de Rota / Gateway
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS route_events (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        timestamp TEXT NOT NULL,
-        device_id TEXT,
-        event_type TEXT,
-        old_ip TEXT,
-        new_ip TEXT,
-        ip_local TEXT,
-        details TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
-    """)
+# ==============================================================================
+# BANCO
+# ==============================================================================
 
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_telemetry_ts ON telemetry_records(timestamp);")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_telemetry_target ON telemetry_records(target);")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_telemetry_pubip ON telemetry_records(ip_publico);")
-
-    # Migração segura para colunas novas
-    cursor.execute("PRAGMA table_info(telemetry_records);")
-    cols = [col[1] for col in cursor.fetchall()]
-    if "jitter" not in cols:
-        cursor.execute("ALTER TABLE telemetry_records ADD COLUMN jitter REAL DEFAULT 0.0;")
-    if "packets_transmitted" not in cols:
-        cursor.execute("ALTER TABLE telemetry_records ADD COLUMN packets_transmitted INTEGER DEFAULT 0;")
-    if "packets_received" not in cols:
-        cursor.execute("ALTER TABLE telemetry_records ADD COLUMN packets_received INTEGER DEFAULT 0;")
-    if "raw_samples" not in cols:
-        cursor.execute("ALTER TABLE telemetry_records ADD COLUMN raw_samples TEXT;")
-    if "ip_changed" not in cols:
-        cursor.execute("ALTER TABLE telemetry_records ADD COLUMN ip_changed INTEGER DEFAULT 0;")
-    if "tech" not in cols:
-        cursor.execute("ALTER TABLE telemetry_records ADD COLUMN tech TEXT DEFAULT 'LTE';")
-    if "ca_active" not in cols:
-        cursor.execute("ALTER TABLE telemetry_records ADD COLUMN ca_active INTEGER DEFAULT 0;")
-    if "accuracy_m" not in cols:
-        cursor.execute("ALTER TABLE telemetry_records ADD COLUMN accuracy_m REAL;")
-
-    conn.commit()
-    conn.close()
-
-init_db()
-
-def get_db():
-    conn = sqlite3.connect(DB_PATH)
+def get_db() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
     return conn
 
+
+def init_db() -> None:
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("PRAGMA journal_mode=WAL;")
+    c.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS ingest_batches (
+            batch_id TEXT PRIMARY KEY,
+            device_id TEXT NOT NULL,
+            agent_version TEXT,
+            window_start REAL,
+            window_end REAL,
+            sent_at REAL,
+            received_at REAL NOT NULL,
+            n_pings INTEGER, n_radio INTEGER, n_network INTEGER,
+            n_gps INTEGER, n_device INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_batches_dev ON ingest_batches(device_id, received_at);
+
+        CREATE TABLE IF NOT EXISTS ping_samples (
+            device_id TEXT NOT NULL,
+            ts REAL NOT NULL,
+            target TEXT NOT NULL,
+            run INTEGER NOT NULL,
+            seq INTEGER NOT NULL,
+            rtt REAL
+        );
+        CREATE INDEX IF NOT EXISTS idx_ping_dev_ts ON ping_samples(device_id, ts);
+
+        CREATE TABLE IF NOT EXISTS radio_samples (
+            device_id TEXT NOT NULL,
+            ts REAL NOT NULL,
+            rat TEXT, ca INTEGER,
+            rsrp INTEGER, rsrq INTEGER, rssnr INTEGER, cqi INTEGER, ta INTEGER,
+            pci INTEGER, earfcn INTEGER, tac INTEGER, ci INTEGER,
+            mcc TEXT, mnc TEXT, operator TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_radio_dev_ts ON radio_samples(device_id, ts);
+
+        CREATE TABLE IF NOT EXISTS network_samples (
+            device_id TEXT NOT NULL,
+            ts REAL NOT NULL,
+            iface TEXT,
+            ip_local TEXT,
+            ip_public TEXT,
+            pub_checked INTEGER DEFAULT 0,
+            trigger TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_net_dev_ts ON network_samples(device_id, ts);
+
+        CREATE TABLE IF NOT EXISTS gps_samples (
+            device_id TEXT NOT NULL,
+            ts REAL NOT NULL,
+            fix_ts REAL,
+            provider TEXT,
+            lat REAL, lon REAL, accuracy_m REAL, alt_m REAL
+        );
+        CREATE INDEX IF NOT EXISTS idx_gps_dev_ts ON gps_samples(device_id, ts);
+
+        CREATE TABLE IF NOT EXISTS device_samples (
+            device_id TEXT NOT NULL,
+            ts REAL NOT NULL,
+            battery_pct INTEGER, temp_c REAL, voltage_v REAL, charging TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_dev_dev_ts ON device_samples(device_id, ts);
+        """
+    )
+    conn.commit()
+    conn.close()
+
+
+init_db()
+
+
 # ==============================================================================
-# MOTOR DE ANÁLISE ESTATÍSTICA E REGRAS DE NEGÓCIO (BACKEND)
+# FUNCOES DE ANALISE
 # ==============================================================================
 
-def earfcn_to_band(earfcn: Optional[int]) -> str:
-    if earfcn is None:
-        return "N/D"
+def clean_int(v: Any) -> Optional[int]:
+    """Converte para int; valores invalidos do Android viram None."""
+    if v is None or v == "":
+        return None
     try:
-        e = int(earfcn)
-    except (ValueError, TypeError):
-        return "N/D"
-    if 0 <= e <= 599: return "B1 (2100 MHz)"
-    if 600 <= e <= 1199: return "B2 (1900 MHz)"
-    if 1200 <= e <= 1949: return "B3 (1800 MHz)"
-    if 1950 <= e <= 2399: return "B4 (1700/2100 AWS)"
-    if 2400 <= e <= 2649: return "B5 (850 MHz)"
-    if 2750 <= e <= 3449: return "B7 (2600 MHz)"
-    if 3450 <= e <= 3799: return "B8 (900 MHz)"
-    if 6150 <= e <= 6449: return "B20 (800 MHz DD)"
-    if 9210 <= e <= 9659: return "B28 (700 MHz APT)"
-    if 37750 <= e <= 38249: return "B38 (2600 MHz TDD)"
-    if 38650 <= e <= 39649: return "B40 (2300 MHz TDD)"
-    if 39650 <= e <= 41589: return "B41 (2500 MHz TDD)"
-    return f"Canal {e}"
+        i = int(float(v))
+    except (TypeError, ValueError):
+        return None
+    if i in (ANDROID_INVALID, -ANDROID_INVALID, 2147483646):
+        return None
+    return i
 
-def calculate_jitter(rtts: List[float]) -> float:
-    """Calcula jitter conforme RFC 3550 (média das diferenças absolutas consecutivas)"""
+
+def clean_float(v: Any) -> Optional[float]:
+    if v is None or v == "":
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(f) or math.isinf(f):
+        return None
+    return f
+
+
+def earfcn_to_band(earfcn: Optional[int]) -> Optional[str]:
+    if earfcn is None:
+        return None
+    e = earfcn
+    table = [
+        (0, 599, "B1 (2100 MHz)"), (600, 1199, "B2 (1900 MHz)"),
+        (1200, 1949, "B3 (1800 MHz)"), (1950, 2399, "B4 (AWS 1700/2100)"),
+        (2400, 2649, "B5 (850 MHz)"), (2750, 3449, "B7 (2600 MHz)"),
+        (3450, 3799, "B8 (900 MHz)"), (6150, 6449, "B20 (800 MHz)"),
+        (9210, 9659, "B28 (700 MHz)"), (37750, 38249, "B38 (2600 TDD)"),
+        (38650, 39649, "B40 (2300 TDD)"), (39650, 41589, "B41 (2500 TDD)"),
+    ]
+    for lo, hi, name in table:
+        if lo <= e <= hi:
+            return name
+    return f"EARFCN {e}"
+
+
+def ta_to_meters(ta: Optional[int]) -> Optional[int]:
+    if ta is None or ta < 0 or ta > 1282:
+        return None
+    return int(round(ta * TA_METERS))
+
+
+def jitter_ms(rtts: List[float]) -> Optional[float]:
+    """Variacao media do atraso entre pacotes consecutivos: media de |RTT[i] - RTT[i-1]|."""
     if len(rtts) < 2:
-        return 0.0
+        return None
     diffs = [abs(rtts[i] - rtts[i - 1]) for i in range(1, len(rtts))]
     return round(sum(diffs) / len(diffs), 2)
 
-def evaluate_sla(loss_pct: float, avg_ms: float, max_ms: float) -> str:
-    """Classificação operacional do enlace"""
-    if loss_pct >= 100.0:
+
+def percentile(values: List[float], p: float) -> Optional[float]:
+    if not values:
+        return None
+    s = sorted(values)
+    k = (len(s) - 1) * p
+    f, c = math.floor(k), math.ceil(k)
+    if f == c:
+        return round(s[int(k)], 2)
+    return round(s[f] + (s[c] - s[f]) * (k - f), 2)
+
+
+def evaluate_sla(sent: int, loss_pct: Optional[float], avg: Optional[float], p95: Optional[float]) -> str:
+    if sent == 0:
+        return "SEM_DADOS"
+    if loss_pct is not None and loss_pct >= 100.0:
         return "FALHA_TOTAL"
-    if loss_pct > 15.0:
-        return "ALERTA_PERDA"
-    if loss_pct > 0.0:
-        return "PERDA_LEVE"
-    if avg_ms > 120.0 or max_ms > 250.0:
-        return "LATENCIA_ALTA"
+    if loss_pct is not None and loss_pct > 10.0:
+        return "CRITICO"
+    if (loss_pct or 0) > 2.0 or (avg or 0) > 150.0:
+        return "DEGRADADO"
+    if (loss_pct or 0) > 0.0 or (avg or 0) > 80.0 or (p95 or 0) > 200.0:
+        return "ATENCAO"
     return "OK"
 
-# ==============================================================================
-# SCHEMAS DE INGESTÃO (Aceita dados brutos do celular ou pré-processados)
-# ==============================================================================
 
-class PingBatchItem(BaseModel):
-    target: str
-    transmitted: Optional[int] = None
-    received: Optional[int] = None
-    rtts: Optional[List[float]] = []
-    avg_ms: Optional[float] = None
-    min_ms: Optional[float] = None
-    max_ms: Optional[float] = None
-    loss_pct: Optional[float] = None
-    status: Optional[str] = None
-    jitter: Optional[float] = None
+def resolve_device(conn: sqlite3.Connection, device_id: Optional[str]) -> Optional[str]:
+    if device_id:
+        return device_id
+    row = conn.execute(
+        "SELECT device_id FROM ingest_batches ORDER BY received_at DESC LIMIT 1"
+    ).fetchone()
+    return row["device_id"] if row else None
 
-class TelemetryPayload(BaseModel):
-    device_id: Optional[str] = "samsung_s10_beyond1"
-    timestamp: Optional[str] = None
-    ip_publico: Optional[str] = "N/A"
-    ip_local: Optional[str] = "100.111.224.41"
-    tech: Optional[str] = "LTE"
-    ca_active: Optional[bool] = False
-    pings: List[PingBatchItem]
-    raw_rf: Optional[Dict[str, Any]] = None
-    rf_metrics: Optional[Dict[str, Any]] = None
-    raw_hardware: Optional[Dict[str, Any]] = None
-    hardware: Optional[Dict[str, Any]] = None
-    throughput: Optional[Dict[str, Any]] = None
-    location: Optional[Dict[str, Any]] = None
 
-@app.post("/api/telemetry")
-async def receive_telemetry(payload: TelemetryPayload):
-    ts = payload.timestamp or datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-    new_pub_ip = (payload.ip_publico or "N/A").strip()
-    new_local_ip = (payload.ip_local or "N/A").strip()
-
-    conn = get_db()
-    cursor = conn.cursor()
-
-    # 1. Auditoria e Detecção Automática de Troca de Gateway / IP Público
-    ip_changed = 0
-    if new_pub_ip and new_pub_ip != "N/A":
-        cursor.execute("""
-        SELECT ip_publico, ip_local FROM telemetry_records 
-        WHERE ip_publico IS NOT NULL AND ip_publico != 'N/A'
-        ORDER BY id DESC LIMIT 1
-        """)
-        last_rec = cursor.fetchone()
-        if last_rec:
-            old_pub = last_rec["ip_publico"]
-            if old_pub and old_pub != "N/A" and old_pub != new_pub_ip:
-                ip_changed = 1
-                cursor.execute("""
-                INSERT INTO route_events (
-                    timestamp, device_id, event_type, old_ip, new_ip, ip_local, details
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    ts, payload.device_id, "TROCA_GATEWAY_PUBLICO",
-                    old_pub, new_pub_ip, new_local_ip,
-                    f"Saída de tráfego celular alternou de {old_pub} para {new_pub_ip}"
-                ))
-
-    # 2. Processamento de RF
-    rf_raw = payload.raw_rf or {}
-    rf_pre = payload.rf_metrics or {}
-
-    rsrp = rf_raw.get("rsrp") if "rsrp" in rf_raw else rf_pre.get("rsrp")
-    rsrq = rf_raw.get("rsrq") if "rsrq" in rf_raw else rf_pre.get("rsrq")
-    rssnr = rf_raw.get("rssnr") if "rssnr" in rf_raw else rf_pre.get("rssnr")
-    cqi = rf_raw.get("cqi") if "cqi" in rf_raw else rf_pre.get("cqi")
-    pci = rf_raw.get("pci") if "pci" in rf_raw else rf_pre.get("pci")
-    tac = rf_raw.get("tac") if "tac" in rf_raw else rf_pre.get("tac")
-    ta = rf_raw.get("ta") if "ta" in rf_raw else rf_pre.get("ta")
-    earfcn = rf_raw.get("earfcn") if "earfcn" in rf_raw else rf_pre.get("earfcn")
-
-    band = rf_pre.get("band") or earfcn_to_band(earfcn)
-
-    if ta is not None and ta != 2147483647 and int(ta) > 0:
-        distance_m = int(ta) * 78
-    else:
-        distance_m = rf_pre.get("distance_m", 0)
-
-    # 3. Processamento de Hardware
-    hw_raw = payload.raw_hardware or {}
-    hw_pre = payload.hardware or {}
-
-    battery_pct = hw_raw.get("battery_pct") if "battery_pct" in hw_raw else hw_pre.get("battery_pct", 100)
-
-    if "temp_raw" in hw_raw and hw_raw["temp_raw"] is not None:
-        temp_c = round(float(hw_raw["temp_raw"]) / 10.0, 1)
-    else:
-        temp_c = hw_pre.get("temp_c", 25.0)
-
-    if "voltage_raw" in hw_raw and hw_raw["voltage_raw"] is not None:
-        voltage_v = round(float(hw_raw["voltage_raw"]) / 1000000.0, 2)
-    else:
-        voltage_v = hw_pre.get("voltage_v", 4.15)
-
-    tp = payload.throughput or {}
-    loc = payload.location or {}
-    lat = loc.get("lat")
-    lon = loc.get("lon")
-    acc_m = loc.get("accuracy")
-
-    tech = payload.tech or rf_pre.get("tech") or "LTE (4G)"
-    ca_active = 1 if (payload.ca_active or rf_pre.get("ca_active")) else 0
-
-    inserted_count = 0
-
-    # 4. Processamento Analítico dos Pings
-    for p in payload.pings:
-        if p.rtts and len(p.rtts) > 0:
-            valid_rtts = [float(r) for r in p.rtts if r is not None and float(r) > 0]
-            tx = p.transmitted if p.transmitted is not None else len(p.rtts)
-            rx = p.received if p.received is not None else len(valid_rtts)
-            lost = max(0, tx - rx)
-            loss_pct = round((lost / tx * 100.0), 2) if tx > 0 else 0.0
-
-            if valid_rtts:
-                avg_ms = round(sum(valid_rtts) / len(valid_rtts), 2)
-                min_ms = round(min(valid_rtts), 2)
-                max_ms = round(max(valid_rtts), 2)
-                jitter = calculate_jitter(valid_rtts)
-            else:
-                avg_ms, min_ms, max_ms, jitter = 0.0, 0.0, 0.0, 0.0
-
-            status = evaluate_sla(loss_pct, avg_ms, max_ms)
-            raw_samples_str = json.dumps(valid_rtts)
+def dedupe_pings(rows) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    Um mesmo pacote (target, run, seq) pode aparecer duas vezes: 'sem resposta'
+    e depois uma resposta atrasada. O pacote conta como recebido se houver
+    qualquer resposta. Retorna {target: [ {ts, rtt}, ... ] ordenado por ts}.
+    """
+    pk: Dict[tuple, Dict[str, Any]] = {}
+    for r in rows:
+        key = (r["target"], r["run"], r["seq"])
+        cur = pk.get(key)
+        if cur is None:
+            pk[key] = {"ts": r["ts"], "rtt": r["rtt"]}
         else:
-            avg_ms = p.avg_ms or 0.0
-            min_ms = p.min_ms or 0.0
-            max_ms = p.max_ms or 0.0
-            loss_pct = p.loss_pct or 0.0
-            jitter = p.jitter or 0.0
-            status = p.status or evaluate_sla(loss_pct, avg_ms, max_ms)
-            tx = p.transmitted or 5
-            rx = p.received or 5
-            raw_samples_str = "[]"
+            cur["ts"] = min(cur["ts"], r["ts"])
+            if cur["rtt"] is None and r["rtt"] is not None:
+                cur["rtt"] = r["rtt"]
+    out: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for (target, _run, _seq), v in pk.items():
+        out[target].append(v)
+    for t in out:
+        out[t].sort(key=lambda x: x["ts"])
+    return out
 
-        cursor.execute("""
-        INSERT INTO telemetry_records (
-            timestamp, device_id, ip_publico, ip_local, ip_changed, tech, ca_active,
-            target, latency_avg, latency_min, latency_max, jitter, loss_pct, status,
-            packets_transmitted, packets_received, raw_samples,
-            rsrp, rsrq, rssnr, band, pci, tac, ta, distance_m, cqi,
-            dl_kbs, ul_kbs, total_rx_mb, total_tx_mb,
-            battery_pct, temp_c, voltage_v, lat, lon, accuracy_m
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            ts, payload.device_id, new_pub_ip, new_local_ip, ip_changed, tech, ca_active,
-            p.target, avg_ms, min_ms, max_ms, jitter, loss_pct, status,
-            tx, rx, raw_samples_str,
-            rsrp, rsrq, rssnr, band,
-            pci, str(tac or ""), ta, distance_m, cqi,
-            tp.get("download_kbs", 0), tp.get("upload_kbs", 0), tp.get("total_rx_mb", 0), tp.get("total_tx_mb", 0),
-            battery_pct, temp_c, voltage_v,
-            lat, lon, acc_m
-        ))
-        inserted_count += 1
 
-    conn.commit()
-    conn.close()
+def stats_for(packets: List[Dict[str, Any]]) -> Dict[str, Any]:
+    sent = len(packets)
+    rtts = [p["rtt"] for p in packets if p["rtt"] is not None]
+    recv = len(rtts)
+    loss = round((sent - recv) / sent * 100.0, 2) if sent else None
+    avg = round(sum(rtts) / recv, 2) if recv else None
+    p95 = percentile(rtts, 0.95)
     return {
-        "status": "success",
-        "inserted": inserted_count,
-        "timestamp": ts,
-        "ip_publico": new_pub_ip,
-        "ip_local": new_local_ip,
-        "ip_changed": bool(ip_changed)
+        "sent": sent,
+        "received": recv,
+        "loss_pct": loss,
+        "avg_ms": avg,
+        "min_ms": round(min(rtts), 2) if rtts else None,
+        "max_ms": round(max(rtts), 2) if rtts else None,
+        "p95_ms": p95,
+        "jitter_ms": jitter_ms(rtts),
+        "status": evaluate_sla(sent, loss, avg, p95),
     }
 
-@app.get("/api/telemetry/latest")
-async def get_latest():
+
+def radio_row(r: sqlite3.Row) -> Dict[str, Any]:
+    d = dict(r)
+    d["band"] = earfcn_to_band(d.get("earfcn"))
+    d["distance_m"] = ta_to_meters(d.get("ta"))
+    return d
+
+
+def route_transitions(net_rows) -> List[Dict[str, Any]]:
+    """Deriva as trocas de IP (local e publico) a partir das amostras, em ordem de horario."""
+    events = []
+    last_local = None
+    last_public = None
+    for r in net_rows:
+        ip_l = r["ip_local"]
+        if ip_l:
+            if last_local and ip_l != last_local:
+                events.append({"ts": r["ts"], "type": "TROCA_IP_LOCAL", "old": last_local, "new": ip_l})
+            last_local = ip_l
+        ip_p = r["ip_public"]
+        if ip_p:
+            if last_public and ip_p != last_public:
+                events.append({
+                    "ts": r["ts"], "type": "TROCA_IP_PUBLICO", "old": last_public,
+                    "new": ip_p, "ip_local": ip_l,
+                })
+            last_public = ip_p
+    return events
+
+
+# ==============================================================================
+# INGESTAO
+# ==============================================================================
+
+class IngestBatch(BaseModel):
+    device_id: str
+    batch_id: str
+    agent_version: Optional[str] = None
+    sent_at: Optional[float] = None
+    window_start: Optional[float] = None
+    window_end: Optional[float] = None
+    # [ts, target, run, seq, rtt|null]
+    pings: List[List[Any]] = Field(default_factory=list)
+    radio: List[Dict[str, Any]] = Field(default_factory=list)
+    network: List[Dict[str, Any]] = Field(default_factory=list)
+    gps: List[Dict[str, Any]] = Field(default_factory=list)
+    device: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+@app.get("/api/v3/myip", response_class=PlainTextResponse)
+async def myip(request: Request, x_forwarded_for: Optional[str] = Header(None)):
+    """Retorna o IP publico de origem visto pelo servidor (sem depender de servico externo)."""
+    if x_forwarded_for:
+        return x_forwarded_for.split(",")[0].strip()
+    return request.client.host if request.client else ""
+
+
+@app.post("/api/v3/ingest")
+async def ingest(batch: IngestBatch, request: Request, x_sent_at: Optional[str] = Header(None)):
+    now = time.time()
+    # Horario de envio informado pelo celular (para medir diferenca de relogio)
+    sent_at = clean_float(x_sent_at) if x_sent_at else batch.sent_at
+    peer_ip = request.client.host if request.client else None
+    if peer_ip in ("127.0.0.1", "::1", "localhost"):
+        peer_ip = None
     conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("""
-    SELECT * FROM telemetry_records ORDER BY id DESC LIMIT 20
-    """)
-    rows = cursor.fetchall()
+    try:
+        exists = conn.execute(
+            "SELECT 1 FROM ingest_batches WHERE batch_id = ?", (batch.batch_id,)
+        ).fetchone()
+        if exists:
+            # Reenvio de um lote ja gravado (resposta anterior se perdeu): confirma sem duplicar.
+            return {"status": "ok", "duplicate": True, "batch_id": batch.batch_id}
 
-    cursor.execute("""
-    SELECT * FROM route_events ORDER BY id DESC LIMIT 1
-    """)
-    last_event = cursor.fetchone()
-    conn.close()
+        dev = batch.device_id
+        ping_rows = []
+        for p in batch.pings:
+            if len(p) < 5:
+                continue
+            ts = clean_float(p[0])
+            if ts is None:
+                continue
+            ping_rows.append((dev, ts, str(p[1]), clean_int(p[2]) or 0, clean_int(p[3]) or 0, clean_float(p[4])))
 
-    if not rows:
-        return {"status": "empty", "message": "Nenhum dado recebido ainda"}
+        radio_rows = []
+        for r in batch.radio:
+            ts = clean_float(r.get("ts"))
+            if ts is None:
+                continue
+            ca = r.get("ca")
+            radio_rows.append((
+                dev, ts, r.get("rat"), None if ca is None else (1 if ca in (True, 1, "true") else 0),
+                clean_int(r.get("rsrp")), clean_int(r.get("rsrq")), clean_int(r.get("rssnr")),
+                clean_int(r.get("cqi")), clean_int(r.get("ta")), clean_int(r.get("pci")),
+                clean_int(r.get("earfcn")), clean_int(r.get("tac")), clean_int(r.get("ci")),
+                r.get("mcc"), r.get("mnc"), r.get("operator"),
+            ))
 
-    latest = [dict(r) for r in rows]
-    targets_seen = set()
-    latest_per_target = []
-    for r in latest:
-        if r["target"] not in targets_seen:
-            targets_seen.add(r["target"])
-            latest_per_target.append(r)
+        net_rows = []
+        for n in batch.network:
+            ts = clean_float(n.get("ts"))
+            if ts is None:
+                continue
+            ip_pub = n.get("ip_public") or None
+            if not ip_pub and n.get("pub_checked") and peer_ip:
+                ip_pub = peer_ip
+            net_rows.append((
+                dev, ts, n.get("iface"), n.get("ip_local") or None, ip_pub,
+                1 if n.get("pub_checked") else 0, n.get("trigger"),
+            ))
+        if net_rows and peer_ip and not any(r[4] for r in net_rows):
+            last = net_rows[-1]
+            net_rows[-1] = (last[0], last[1], last[2], last[3], peer_ip, 1, last[6] or "ingest_peer")
 
-    most_recent = latest[0]
-    return {
-        "status": "online",
-        "latest_entry": most_recent,
-        "targets": latest_per_target,
-        "last_route_switch": dict(last_event) if last_event else None
-    }
+        gps_rows = []
+        for g in batch.gps:
+            ts = clean_float(g.get("ts"))
+            lat, lon = clean_float(g.get("lat")), clean_float(g.get("lon"))
+            if ts is None or lat is None or lon is None:
+                continue
+            age = clean_float(g.get("fix_age_s"))
+            gps_rows.append((
+                dev, ts, (ts - age) if age is not None else None, g.get("provider"),
+                lat, lon, clean_float(g.get("acc")), clean_float(g.get("alt")),
+            ))
 
-@app.get("/api/telemetry/events")
-async def get_route_events(limit: int = 50):
+        dev_rows = []
+        for d in batch.device:
+            ts = clean_float(d.get("ts"))
+            if ts is None:
+                continue
+            temp_raw = clean_float(d.get("temp_raw"))
+            volt_raw = clean_float(d.get("voltage_raw"))
+            dev_rows.append((
+                dev, ts, clean_int(d.get("battery_pct")),
+                round(temp_raw / 10.0, 1) if temp_raw is not None else None,
+                round(volt_raw / 1_000_000.0, 3) if volt_raw is not None else None,
+                d.get("charging"),
+            ))
+
+        c = conn.cursor()
+        c.executemany("INSERT INTO ping_samples VALUES (?,?,?,?,?,?)", ping_rows)
+        c.executemany("INSERT INTO radio_samples VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", radio_rows)
+        c.executemany("INSERT INTO network_samples VALUES (?,?,?,?,?,?,?)", net_rows)
+        c.executemany("INSERT INTO gps_samples VALUES (?,?,?,?,?,?,?,?)", gps_rows)
+        c.executemany("INSERT INTO device_samples VALUES (?,?,?,?,?,?)", dev_rows)
+        c.execute(
+            "INSERT INTO ingest_batches VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (batch.batch_id, dev, batch.agent_version, batch.window_start, batch.window_end,
+             sent_at, now, len(ping_rows), len(radio_rows), len(net_rows),
+             len(gps_rows), len(dev_rows)),
+        )
+        conn.commit()
+        return {
+            "status": "ok",
+            "duplicate": False,
+            "batch_id": batch.batch_id,
+            "stored": {
+                "pings": len(ping_rows), "radio": len(radio_rows), "network": len(net_rows),
+                "gps": len(gps_rows), "device": len(dev_rows),
+            },
+        }
+    finally:
+        conn.close()
+
+
+# ==============================================================================
+# CONSULTAS (toda a analise acontece aqui)
+# ==============================================================================
+
+@app.get("/api/v3/devices")
+async def devices():
     conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM route_events ORDER BY id DESC LIMIT ?", (limit,))
-    rows = cursor.fetchall()
+    rows = conn.execute(
+        """SELECT device_id, MAX(received_at) AS last_seen, COUNT(*) AS batches
+           FROM ingest_batches GROUP BY device_id ORDER BY last_seen DESC"""
+    ).fetchall()
     conn.close()
-    return {"count": len(rows), "events": [dict(r) for r in rows]}
+    return {"devices": [dict(r) for r in rows]}
 
-@app.get("/api/telemetry/history")
-async def get_history(
-    limit: int = Query(100, ge=10, le=1000),
-    target: Optional[str] = None
+
+@app.get("/api/v3/summary")
+async def summary(device_id: Optional[str] = None, window_s: int = Query(60, ge=10, le=3600)):
+    conn = get_db()
+    try:
+        dev = resolve_device(conn, device_id)
+        if not dev:
+            return {"status": "empty"}
+        now = time.time()
+
+        b = conn.execute(
+            "SELECT * FROM ingest_batches WHERE device_id=? ORDER BY received_at DESC LIMIT 1", (dev,)
+        ).fetchone()
+        last_seen = b["received_at"] if b else None
+        clock_skew = None
+        if b and b["sent_at"]:
+            clock_skew = round(b["received_at"] - b["sent_at"], 1)
+
+        # Latencia: ultima janela completa terminando no ultimo ping recebido
+        last_ping = conn.execute(
+            "SELECT MAX(ts) AS t FROM ping_samples WHERE device_id=?", (dev,)
+        ).fetchone()["t"]
+        latency = {}
+        if last_ping:
+            rows = conn.execute(
+                "SELECT ts, target, run, seq, rtt FROM ping_samples WHERE device_id=? AND ts > ? AND ts <= ?",
+                (dev, last_ping - window_s, last_ping),
+            ).fetchall()
+            for target, pkts in dedupe_pings(rows).items():
+                latency[target] = stats_for(pkts)
+
+        radio = conn.execute(
+            "SELECT * FROM radio_samples WHERE device_id=? ORDER BY ts DESC LIMIT 1", (dev,)
+        ).fetchone()
+        net = conn.execute(
+            "SELECT * FROM network_samples WHERE device_id=? ORDER BY ts DESC LIMIT 1", (dev,)
+        ).fetchone()
+        pub = conn.execute(
+            """SELECT ts, ip_public FROM network_samples
+               WHERE device_id=? AND ip_public IS NOT NULL ORDER BY ts DESC LIMIT 1""", (dev,)
+        ).fetchone()
+        gps = conn.execute(
+            "SELECT * FROM gps_samples WHERE device_id=? ORDER BY ts DESC LIMIT 1", (dev,)
+        ).fetchone()
+        hw = conn.execute(
+            "SELECT * FROM device_samples WHERE device_id=? ORDER BY ts DESC LIMIT 1", (dev,)
+        ).fetchone()
+
+        net_24h = conn.execute(
+            "SELECT ts, ip_local, ip_public FROM network_samples WHERE device_id=? AND ts > ? ORDER BY ts",
+            (dev, now - 86400),
+        ).fetchall()
+        events = route_transitions(net_24h)
+        last_public_change = next((e for e in reversed(events) if e["type"] == "TROCA_IP_PUBLICO"), None)
+        distinct_public = sorted({r["ip_public"] for r in net_24h if r["ip_public"]})
+
+        return {
+            "status": "online" if last_seen and now - last_seen < 150 else "offline",
+            "device_id": dev,
+            "agent_version": b["agent_version"] if b else None,
+            "server_time": now,
+            "last_seen": last_seen,
+            "clock_skew_s": clock_skew,
+            "latency_window_s": window_s,
+            "latency": latency,
+            "radio": radio_row(radio) if radio else None,
+            "network": {
+                "ts": net["ts"] if net else None,
+                "ip_local": net["ip_local"] if net else None,
+                "iface": net["iface"] if net else None,
+                "ip_public": pub["ip_public"] if pub else None,
+                "ip_public_ts": pub["ts"] if pub else None,
+                "public_ips_24h": distinct_public,
+                "last_public_change": last_public_change,
+            },
+            "gps": dict(gps) if gps else None,
+            "device": dict(hw) if hw else None,
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/api/v3/latency")
+async def latency_series(
+    device_id: Optional[str] = None,
+    minutes: int = Query(60, ge=1, le=1440),
+    bucket_s: int = Query(60, ge=1, le=3600),
 ):
     conn = get_db()
-    cursor = conn.cursor()
-    if target:
-        cursor.execute("""
-        SELECT * FROM telemetry_records 
-        WHERE target = ? 
-        ORDER BY id DESC LIMIT ?
-        """, (target, limit))
-    else:
-        cursor.execute("""
-        SELECT * FROM telemetry_records 
-        ORDER BY id DESC LIMIT ?
-        """, (limit,))
-    rows = cursor.fetchall()
-    conn.close()
+    try:
+        dev = resolve_device(conn, device_id)
+        if not dev:
+            return {"targets": [], "series": {}}
+        since = time.time() - minutes * 60
+        rows = conn.execute(
+            "SELECT ts, target, run, seq, rtt FROM ping_samples WHERE device_id=? AND ts > ? ORDER BY ts",
+            (dev, since),
+        ).fetchall()
+    finally:
+        conn.close()
 
-    history = [dict(r) for r in reversed(rows)]
-    return {"count": len(history), "data": history}
+    series: Dict[str, List[Dict[str, Any]]] = {}
+    for target, pkts in dedupe_pings(rows).items():
+        buckets: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+        for p in pkts:
+            buckets[int(p["ts"] // bucket_s * bucket_s)].append(p)
+        series[target] = [{"t": t, **stats_for(buckets[t])} for t in sorted(buckets)]
+    return {"device_id": dev, "bucket_s": bucket_s, "targets": sorted(series), "series": series}
 
-@app.get("/api/telemetry/geo")
-async def get_geo_history(limit: int = 100):
+
+@app.get("/api/v3/pings/raw")
+async def pings_raw(device_id: Optional[str] = None, minutes: int = Query(10, ge=1, le=120)):
+    """Amostras individuais (1/s) ja deduplicadas, para grafico de alta resolucao."""
     conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("""
-    SELECT DISTINCT timestamp, target, latency_avg, rsrp, rsrq, band, tech, distance_m, ip_publico, ip_local, lat, lon, accuracy_m
-    FROM telemetry_records
-    WHERE lat IS NOT NULL AND lon IS NOT NULL
-    ORDER BY id DESC LIMIT ?
-    """, (limit,))
-    rows = cursor.fetchall()
-    conn.close()
-    return {"count": len(rows), "points": [dict(r) for r in reversed(rows)]}
+    try:
+        dev = resolve_device(conn, device_id)
+        if not dev:
+            return {"series": {}}
+        rows = conn.execute(
+            "SELECT ts, target, run, seq, rtt FROM ping_samples WHERE device_id=? AND ts > ? ORDER BY ts",
+            (dev, time.time() - minutes * 60),
+        ).fetchall()
+    finally:
+        conn.close()
+    return {"device_id": dev, "series": dedupe_pings(rows)}
 
-@app.get("/api/telemetry/stats")
-async def get_stats():
+
+@app.get("/api/v3/radio")
+async def radio_series(device_id: Optional[str] = None, minutes: int = Query(60, ge=1, le=1440)):
     conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("""
-    SELECT 
-        COUNT(*) as total_checks,
-        AVG(latency_avg) as avg_latency,
-        MIN(latency_min) as min_latency,
-        MAX(latency_max) as max_latency,
-        AVG(jitter) as avg_jitter,
-        AVG(loss_pct) as avg_loss,
-        AVG(rsrp) as avg_rsrp,
-        AVG(temp_c) as avg_temp
-    FROM telemetry_records
-    """)
-    row = cursor.fetchone()
+    try:
+        dev = resolve_device(conn, device_id)
+        if not dev:
+            return {"samples": []}
+        rows = conn.execute(
+            "SELECT * FROM radio_samples WHERE device_id=? AND ts > ? ORDER BY ts",
+            (dev, time.time() - minutes * 60),
+        ).fetchall()
+    finally:
+        conn.close()
+    samples = [radio_row(r) for r in rows]
+    handovers = []
+    for i in range(1, len(samples)):
+        a, b = samples[i - 1], samples[i]
+        if a["pci"] is not None and b["pci"] is not None and (a["pci"], a["earfcn"]) != (b["pci"], b["earfcn"]):
+            handovers.append({"ts": b["ts"], "from_pci": a["pci"], "to_pci": b["pci"],
+                              "from_band": a["band"], "to_band": b["band"]})
+    return {"device_id": dev, "samples": samples, "handovers": handovers}
 
-    cursor.execute("SELECT COUNT(DISTINCT ip_publico) as unique_public_ips FROM telemetry_records WHERE ip_publico != 'N/A'")
-    ip_stats = cursor.fetchone()
-    conn.close()
 
-    res = dict(row) if row else {}
-    if ip_stats:
-        res["unique_public_ips"] = ip_stats["unique_public_ips"]
-    return res
+@app.get("/api/v3/gps")
+async def gps_track(device_id: Optional[str] = None, minutes: int = Query(240, ge=1, le=10080)):
+    conn = get_db()
+    try:
+        dev = resolve_device(conn, device_id)
+        if not dev:
+            return {"points": []}
+        rows = conn.execute(
+            "SELECT * FROM gps_samples WHERE device_id=? AND ts > ? ORDER BY ts",
+            (dev, time.time() - minutes * 60),
+        ).fetchall()
+    finally:
+        conn.close()
+    # Mesma posicao (mesmo fix) repetida a cada leitura nao vira ponto novo
+    points, last_fix = [], None
+    for r in rows:
+        key = (r["fix_ts"] and round(r["fix_ts"]), r["lat"], r["lon"])
+        if key == last_fix:
+            continue
+        last_fix = key
+        points.append(dict(r))
+    return {"device_id": dev, "points": points}
+
+
+@app.get("/api/v3/events")
+async def events(device_id: Optional[str] = None, minutes: int = Query(1440, ge=1, le=10080)):
+    conn = get_db()
+    try:
+        dev = resolve_device(conn, device_id)
+        if not dev:
+            return {"events": []}
+        rows = conn.execute(
+            "SELECT ts, ip_local, ip_public FROM network_samples WHERE device_id=? AND ts > ? ORDER BY ts",
+            (dev, time.time() - minutes * 60),
+        ).fetchall()
+    finally:
+        conn.close()
+    ev = route_transitions(rows)
+    ev.reverse()
+    return {"device_id": dev, "events": ev}
+
+
+@app.get("/api/v3/table")
+async def minute_table(device_id: Optional[str] = None, minutes: int = Query(15, ge=1, le=240)):
+    """Uma linha por minuto e por alvo, cruzando latencia com radio e rede do mesmo minuto."""
+    conn = get_db()
+    try:
+        dev = resolve_device(conn, device_id)
+        if not dev:
+            return {"rows": []}
+        since = time.time() - minutes * 60
+        prow = conn.execute(
+            "SELECT ts, target, run, seq, rtt FROM ping_samples WHERE device_id=? AND ts > ? ORDER BY ts",
+            (dev, since),
+        ).fetchall()
+        rrow = conn.execute(
+            "SELECT * FROM radio_samples WHERE device_id=? AND ts > ? ORDER BY ts", (dev, since)
+        ).fetchall()
+        nrow = conn.execute(
+            "SELECT ts, ip_local, ip_public FROM network_samples WHERE device_id=? AND ts > ? ORDER BY ts",
+            (dev, since - 600),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    radio_by_min: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+    for r in rrow:
+        radio_by_min[int(r["ts"] // 60 * 60)].append(radio_row(r))
+    net_by_min: Dict[int, List[sqlite3.Row]] = defaultdict(list)
+    for n in nrow:
+        net_by_min[int(n["ts"] // 60 * 60)].append(n)
+    change_minutes = {int(e["ts"] // 60 * 60) for e in route_transitions(nrow) if e["type"] == "TROCA_IP_PUBLICO"}
+
+    out = []
+    for target, pkts in dedupe_pings(prow).items():
+        buckets: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+        for p in pkts:
+            buckets[int(p["ts"] // 60 * 60)].append(p)
+        for t, bp in buckets.items():
+            rs = radio_by_min.get(t, [])
+            rsrps = [x["rsrp"] for x in rs if x["rsrp"] is not None]
+            rsrqs = [x["rsrq"] for x in rs if x["rsrq"] is not None]
+            pcis = sorted({x["pci"] for x in rs if x["pci"] is not None})
+            ns = net_by_min.get(t, [])
+            pubs = sorted({x["ip_public"] for x in ns if x["ip_public"]})
+            locs = sorted({x["ip_local"] for x in ns if x["ip_local"]})
+            last_r = rs[-1] if rs else None
+            out.append({
+                "t": t, "target": target, **stats_for(bp),
+                "rsrp_avg": round(sum(rsrps) / len(rsrps), 1) if rsrps else None,
+                "rsrp_min": min(rsrps) if rsrps else None,
+                "rsrq_avg": round(sum(rsrqs) / len(rsrqs), 1) if rsrqs else None,
+                "radio_samples": len(rs),
+                "pcis": pcis,
+                "handover": len(pcis) > 1,
+                "band": last_r["band"] if last_r else None,
+                "rat": last_r["rat"] if last_r else None,
+                "ca": last_r["ca"] if last_r else None,
+                "distance_m": last_r["distance_m"] if last_r else None,
+                "ip_public": pubs,
+                "ip_local": locs,
+                "public_ip_changed": t in change_minutes,
+            })
+    out.sort(key=lambda x: (-x["t"], x["target"]))
+    return {"device_id": dev, "rows": out}
+
 
 @app.get("/api/status")
 async def status():
-    return {
-        "service": "celldiag-telemetry-server",
-        "status": "running",
-        "version": "2.1.0",
-        "engine": "backend_analytics_v2_route_auditing",
-        "time": datetime.utcnow().isoformat()
-    }
+    return {"service": "celldiag-telemetry-hub", "status": "running", "version": VERSION, "time": time.time()}
 
-# Serve Static UI
+
+# ==============================================================================
+# INTERFACE
+# ==============================================================================
+
 if os.path.exists(STATIC_DIR):
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
 
 @app.get("/")
 async def serve_index():
     index_file = os.path.join(STATIC_DIR, "index.html")
     if os.path.exists(index_file):
-        return FileResponse(index_file)
-    return {"message": "Interface em construção"}
+        return FileResponse(index_file, headers={"Cache-Control": "no-cache"})
+    raise HTTPException(status_code=404, detail="Interface nao encontrada")
