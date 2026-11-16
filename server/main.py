@@ -6,6 +6,7 @@ Modelo: o celular so registra amostras brutas, cada uma com seu proprio horario
 SLA, banda, distancia, trocas de IP, handover) e feita aqui, no momento da
 consulta, a partir das amostras brutas.
 """
+import bisect
 import json
 import math
 import os
@@ -565,7 +566,7 @@ async def latency_series(
 
 
 @app.get("/api/v3/pings/raw")
-async def pings_raw(device_id: Optional[str] = None, minutes: int = Query(10, ge=1, le=120)):
+async def pings_raw(device_id: Optional[str] = None, minutes: int = Query(60, ge=1, le=1440)):
     """Amostras individuais (1/s) ja deduplicadas, para grafico de alta resolucao."""
     conn = get_db()
     try:
@@ -576,6 +577,13 @@ async def pings_raw(device_id: Optional[str] = None, minutes: int = Query(10, ge
             "SELECT ts, target, run, seq, rtt FROM ping_samples WHERE device_id=? AND ts > ? ORDER BY ts",
             (dev, time.time() - minutes * 60),
         ).fetchall()
+        # Se na janela imediata nao houver pings (ex: sonda offline ou em stand-by), retorna os ultimos pings gravados
+        if not rows:
+            recent_rows = conn.execute(
+                "SELECT ts, target, run, seq, rtt FROM ping_samples WHERE device_id=? ORDER BY ts DESC LIMIT 1200",
+                (dev,),
+            ).fetchall()
+            rows = list(reversed(recent_rows))
     finally:
         conn.close()
     return {"device_id": dev, "series": dedupe_pings(rows)}
@@ -611,20 +619,71 @@ async def gps_track(device_id: Optional[str] = None, minutes: int = Query(240, g
         dev = resolve_device(conn, device_id)
         if not dev:
             return {"points": []}
+        since = time.time() - minutes * 60
         rows = conn.execute(
             "SELECT * FROM gps_samples WHERE device_id=? AND ts > ? ORDER BY ts",
-            (dev, time.time() - minutes * 60),
+            (dev, since),
+        ).fetchall()
+
+        # Correlacionar com pings e radio para associar latencia e sinal a cada ponto GPS
+        pings = conn.execute(
+            "SELECT ts, rtt FROM ping_samples WHERE device_id=? AND ts > ? ORDER BY ts",
+            (dev, since - 40),
+        ).fetchall()
+        radios = conn.execute(
+            "SELECT ts, rsrp, rat, earfcn FROM radio_samples WHERE device_id=? AND ts > ? ORDER BY ts",
+            (dev, since - 40),
         ).fetchall()
     finally:
         conn.close()
-    # Mesma posicao (mesmo fix) repetida a cada leitura nao vira ponto novo
-    points, last_fix = [], None
+
+    ping_times = [p["ts"] for p in pings]
+    radio_times = [r["ts"] for r in radios]
+
+    points, last_key, last_ts = [], None, 0
     for r in rows:
         key = (r["fix_ts"] and round(r["fix_ts"]), r["lat"], r["lon"])
-        if key == last_fix:
+        if key == last_key and (r["ts"] - last_ts) < 60:
             continue
-        last_fix = key
-        points.append(dict(r))
+        last_key = key
+        last_ts = r["ts"]
+
+        pt = dict(r)
+
+        # Correlacionar pings mais proximos (+- 20s)
+        if ping_times:
+            i0 = bisect.bisect_left(ping_times, pt["ts"] - 20)
+            i1 = bisect.bisect_right(ping_times, pt["ts"] + 20)
+            nearby = [pings[i] for i in range(i0, i1)]
+            valid_rtts = [p["rtt"] for p in nearby if p["rtt"] is not None]
+            pt["rtt"] = round(sum(valid_rtts) / len(valid_rtts), 1) if valid_rtts else None
+            pt["loss_pct"] = (
+                round((len(nearby) - len(valid_rtts)) / len(nearby) * 100.0, 1)
+                if nearby
+                else 0.0
+            )
+        else:
+            pt["rtt"] = None
+            pt["loss_pct"] = 0.0
+
+        # Correlacionar radio mais proximo
+        if radio_times:
+            ridx = bisect.bisect_left(radio_times, pt["ts"])
+            best_idx = min(ridx, len(radios) - 1)
+            if best_idx > 0 and abs(radios[best_idx - 1]["ts"] - pt["ts"]) < abs(
+                radios[best_idx]["ts"] - pt["ts"]
+            ):
+                best_idx -= 1
+            rad = radios[best_idx]
+            pt["rsrp"] = rad["rsrp"]
+            pt["rat"] = rad["rat"]
+            pt["band"] = earfcn_to_band(rad["earfcn"])
+        else:
+            pt["rsrp"] = None
+            pt["rat"] = None
+            pt["band"] = None
+
+        points.append(pt)
     return {"device_id": dev, "points": points}
 
 

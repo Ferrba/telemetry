@@ -1,794 +1,899 @@
-(() => {
-  // grafenomonitor · Bancada Técnica em Produção (v3.2)
-  // Conectada 100% aos dados reais da sonda Samsung Galaxy S10 via /api/v3/*
+/**
+ * grafenomonitor · Versão Simplificada (Latência & Geolocalização)
+ * Arquitetura limpa: Ingestão 1 Hz, mapa Leaflet interativo e gráfico de latência em tempo real
+ */
 
-  const REFRESH_MS = 5000;
-  let winSec = 900; // 300 (5m), 900 (15m), 3600 (1h), 21600 (6h)
-  let paused = false;
-  let showTgt1 = true;
-  let showTgt2 = true;
-  let showRsrp = true;
-  let showSinr = false;
-  let hoverIdx = null;
+(function () {
+  'use strict';
 
-  let currentData = null;
-  let timeline = [];
-  let rawSamplesStore = {};
-  let openRawKey = null;
+  // --- ESTADO GLOBAL ---
+  const state = {
+    windowSeconds: 900, // 15 minutos padrão
+    isPaused: false,
+    theme: localStorage.getItem('gm_theme') || 'dark',
+    target1Active: true,
+    target2Active: true,
+    lastUpdateTs: 0,
+    pollTimer: null,
+    summary: null,
+    pingsRaw: {},
+    gpsPoints: [],
+    map: null,
+    tileLayer: null,
+    probeMarker: null,
+    probeCircle: null,
+    trailLayer: null,
+    chartHoverIndex: -1,
+    chartData: []
+  };
 
-  // Leaflet inline map
-  let leafletMap = null;
-  let mapMarker = null;
-  let mapCircle = null;
-  let mapTrail = null;
-  let mapCentered = false;
+  // --- ELEMENTOS DOM ---
+  const el = {
+    // Topbar
+    statusDot: document.getElementById('statusDot'),
+    devName: document.getElementById('devName'),
+    devNet: document.getElementById('devNet'),
+    btnPause: document.getElementById('btnPause'),
+    btnPauseTxt: document.getElementById('btnPauseTxt'),
+    btnTheme: document.getElementById('btnTheme'),
+    themeIcon: document.getElementById('themeIcon'),
+    liveStatus: document.getElementById('liveStatus'),
+    timeButtons: document.querySelectorAll('.btn-toggle[data-win]'),
 
-  const $ = (id) => document.getElementById(id);
-  const isNum = (v) => typeof v === 'number' && !Number.isNaN(v);
-  const fmt = (v, d = 1) => (isNum(v) ? v.toFixed(d).replace('.', ',') : '--');
-  const pad = (n) => String(n).padStart(2, '0');
+    // KPIs
+    cardLatency: document.getElementById('cardLatency'),
+    badgeLatency: document.getElementById('badgeLatency'),
+    valRtt: document.getElementById('valRtt'),
+    lblT1: document.getElementById('lblT1'),
+    valT1: document.getElementById('valT1'),
+    lblT2: document.getElementById('lblT2'),
+    valT2: document.getElementById('valT2'),
+    valP50: document.getElementById('valP50'),
+    valP95: document.getElementById('valP95'),
+    valJitter: document.getElementById('valJitter'),
 
-  function fmtTime(epoch, withSec = true) {
-    if (!isNum(epoch)) return '--:--';
-    const d = new Date(epoch * 1000);
-    const h = pad(d.getHours()), m = pad(d.getMinutes()), s = pad(d.getSeconds());
-    return withSec ? `${h}:${m}:${s}` : `${h}:${m}`;
-  }
+    cardLoss: document.getElementById('cardLoss'),
+    badgeLoss: document.getElementById('badgeLoss'),
+    valLoss: document.getElementById('valLoss'),
+    valLossSub: document.getElementById('valLossSub'),
+    valPktsRec: document.getElementById('valPktsRec'),
+    valPktsSent: document.getElementById('valPktsSent'),
 
-  function fmtAgo(sec) {
-    if (!isNum(sec)) return '--';
-    const s = Math.max(0, Math.round(sec));
-    if (s < 60) return `há ${s} s`;
-    if (s < 3600) return `há ${Math.round(s / 60)} min`;
-    if (s < 86400) return `há ${(s / 3600).toFixed(1).replace('.', ',')} h`;
-    return `há ${(s / 86400).toFixed(1).replace('.', ',')} d`;
-  }
+    cardGps: document.getElementById('cardGps'),
+    badgeGps: document.getElementById('badgeGps'),
+    valCoords: document.getElementById('valCoords'),
+    valAccuracy: document.getElementById('valAccuracy'),
+    valProvider: document.getElementById('valProvider'),
+    valFixAge: document.getElementById('valFixAge'),
+    valAlt: document.getElementById('valAlt'),
 
-  function fmtDuration(sec) {
-    if (!isNum(sec) || sec <= 0) return 'ativa';
-    const d = Math.floor(sec / 86400);
-    const h = Math.floor((sec % 86400) / 3600);
-    const m = Math.floor((sec % 3600) / 60);
-    if (d > 0) return `sessão ${d}d ${pad(h)}h ${pad(m)}m`;
-    if (h > 0) return `sessão ${h}h ${pad(m)}m`;
-    return `sessão ${m}m`;
-  }
+    cardRadio: document.getElementById('cardRadio'),
+    badgeSignal: document.getElementById('badgeSignal'),
+    valRsrp: document.getElementById('valRsrp'),
+    valBand: document.getElementById('valBand'),
+    valCarrier: document.getElementById('valCarrier'),
+    valPublicIp: document.getElementById('valPublicIp'),
+    valBattery: document.getElementById('valBattery'),
 
-  function winLabel(s) {
-    if (s <= 300) return '5m';
-    if (s <= 900) return '15m';
-    if (s <= 3600) return '1h';
-    return `${Math.round(s / 3600)}h`;
-  }
+    // Map controls
+    btnFitMap: document.getElementById('btnFitMap'),
+    btnRecenterMap: document.getElementById('btnRecenterMap'),
+    mapOverlay: document.getElementById('mapOverlay'),
+    mapPointCount: document.getElementById('mapPointCount'),
 
-  function getPal() {
-    const dk = document.documentElement.dataset.theme === 'dark';
-    return dk ? {
-      bg: '#191D1A',
-      axisZero: '#3E4740',
-      grid: '#262C27',
-      ink: '#E5E9E4',
-      ink3: '#818C84',
-      amber: '#DBA054',
-      amberLine: 'rgba(219,160,84,.85)',
-      cobalt: '#789EEB',
-      violet: '#B39DDB',
-      crimson: '#E56E66',
-      pine: '#5CB88A',
-      pineLine: 'rgba(92,184,138,.82)',
-      stripW: 'rgba(229,110,102,.22)',
-      stripL: 'rgba(219,160,84,.20)',
-      stripCA: 'rgba(120,158,235,.18)',
-      wcdmaBg: 'rgba(229,110,102,.08)',
-      evDash: 'rgba(229,233,228,.45)',
-      cross: 'rgba(229,233,228,.65)'
-    } : {
-      bg: '#FFFFFF',
-      axisZero: '#B8C0B6',
-      grid: '#ECEEEB',
-      ink: '#161A17',
-      ink3: '#768079',
-      amber: '#9A5D12',
-      amberLine: 'rgba(154,93,18,.80)',
-      cobalt: '#1D3C8F',
-      violet: '#5E35B1',
-      crimson: '#B3261E',
-      pine: '#1E5B3E',
-      pineLine: 'rgba(30,91,62,.76)',
-      stripW: 'rgba(179,38,30,.18)',
-      stripL: 'rgba(154,93,18,.18)',
-      stripCA: 'rgba(29,60,143,.10)',
-      wcdmaBg: 'rgba(179,38,30,.05)',
-      evDash: 'rgba(22,26,23,.45)',
-      cross: 'rgba(22,26,23,.65)'
-    };
-  }
+    // Latency controls
+    chkTarget1: document.getElementById('chkTarget1'),
+    chkTarget2: document.getElementById('chkTarget2'),
+    chipTgt1: document.getElementById('chipTgt1'),
+    chipTgt2: document.getElementById('chipTgt2'),
+    lblTarget1Name: document.getElementById('lblTarget1Name'),
+    lblTarget2Name: document.getElementById('lblTarget2Name'),
+    chartReadout: document.getElementById('chartReadout'),
+    latencyCanvas: document.getElementById('latencyCanvas'),
 
-  // ============================================================================
-  // CANVAS ANALISADOR CORRELACIONADO (RTT + RSRP + SINR + RAT STRIP + CROSSHAIR)
-  // ============================================================================
-  const canvas = $('tsCanvas');
-  const ctx = canvas.getContext('2d');
+    // Distribution stats
+    statMin: document.getElementById('statMin'),
+    statP50: document.getElementById('statP50'),
+    statP95: document.getElementById('statP95'),
+    statMax: document.getElementById('statMax'),
+    statJitter: document.getElementById('statJitter'),
 
-  function resizeCanvas() {
-    const dpr = window.devicePixelRatio || 1;
-    const r = canvas.getBoundingClientRect();
-    if (r.width === 0 || r.height === 0) return;
-    canvas.width = Math.round(r.width * dpr);
-    canvas.height = Math.round(r.height * dpr);
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  }
-  window.addEventListener('resize', () => { resizeCanvas(); drawChart(); });
+    // Table
+    tableHistoryBody: document.getElementById('tableHistoryBody'),
+    tableCountTag: document.getElementById('tableCountTag'),
+    btnExportCsv: document.getElementById('btnExportCsv'),
+    footerProbeDetails: document.getElementById('footerProbeDetails')
+  };
 
-  function drawChart() {
-    const r = canvas.getBoundingClientRect();
-    const w = r.width, h = r.height;
-    if (w === 0 || h === 0) return;
-
-    const pal = getPal();
-    ctx.fillStyle = pal.bg;
-    ctx.fillRect(0, 0, w, h);
-
-    const slice = timeline;
-    const padL = 48, padR = (showRsrp || showSinr) ? 44 : 16, padT = 18, padB = 42;
-    const pw = w - padL - padR, ph = h - padT - padB;
-
-    // Eixo Y de RTT dinamico (minimo 160 ms, expande se houver picos maiores)
-    let maxRttPlot = 160;
-    for (let i = 0; i < slice.length; i++) {
-      if (isNum(slice[i].rtt) && slice[i].rtt > maxRttPlot) maxRttPlot = Math.min(400, Math.ceil(slice[i].rtt / 50) * 50);
-    }
-
-    const xAt = (i) => padL + (slice.length > 1 ? (i / (slice.length - 1)) * pw : pw / 2);
-    const yRtt = (v) => padT + ph * (1 - Math.min(maxRttPlot, Math.max(0, v)) / maxRttPlot);
-    const yRsrp = (v) => padT + ph * (1 - (Math.min(-65, Math.max(-120, v)) + 120) / 55);
-    const ySinr = (v) => padT + ph * (1 - (Math.min(25, Math.max(-15, v)) + 15) / 40);
-
-    // Linhas horizontais de grade RTT
-    const ySteps = [0, Math.round(maxRttPlot * 0.25), Math.round(maxRttPlot * 0.5), Math.round(maxRttPlot * 0.75), maxRttPlot];
-    ctx.lineWidth = 1;
-    ySteps.forEach((ms, idx) => {
-      const y = Math.round(yRtt(ms)) + 0.5;
-      ctx.strokeStyle = ms === 0 ? pal.axisZero : pal.grid;
-      ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(w - padR, y); ctx.stroke();
-      ctx.fillStyle = pal.ink3;
-      ctx.font = '500 10px "Azeret Mono", monospace';
-      ctx.textAlign = 'right';
-      ctx.fillText(ms + (idx === ySteps.length - 1 ? ' ms' : ''), padL - 6, y + 3.5);
-    });
-
-    if (showRsrp) {
-      [-75, -95, -115].forEach(dbm => {
-        const y = Math.round(yRsrp(dbm)) + 0.5;
-        ctx.fillStyle = pal.amber;
-        ctx.font = '400 9.5px "Azeret Mono", monospace';
-        ctx.textAlign = 'left';
-        ctx.fillText(`${dbm}dBm`, w - padR + 4, y + 3);
-      });
-    } else if (showSinr) {
-      [20, 5, -10].forEach(db => {
-        const y = Math.round(ySinr(db)) + 0.5;
-        ctx.fillStyle = pal.pine;
-        ctx.font = '400 9.5px "Azeret Mono", monospace';
-        ctx.textAlign = 'left';
-        ctx.fillText(`${db >= 0 ? '+' : ''}${db}dB`, w - padR + 4, y + 3);
-      });
-    }
-
-    if (!slice.length) {
-      ctx.fillStyle = pal.ink3;
-      ctx.font = '500 12px "Azeret Mono", monospace';
-      ctx.textAlign = 'center';
-      ctx.fillText('Aguardando amostras na janela selecionada…', w / 2, h / 2);
-      return;
-    }
-
-    // Grade vertical de tempo
-    const tickCount = Math.min(7, slice.length);
-    for (let k = 0; k < tickCount; k++) {
-      const idx = Math.round((k / Math.max(1, tickCount - 1)) * (slice.length - 1));
-      const x = Math.round(xAt(idx)) + 0.5;
-      ctx.strokeStyle = pal.grid;
-      ctx.beginPath(); ctx.moveTo(x, padT); ctx.lineTo(x, padT + ph); ctx.stroke();
-      ctx.fillStyle = pal.ink3;
-      ctx.font = '500 10px "Azeret Mono", monospace';
-      ctx.textAlign = k === 0 ? 'left' : (k === tickCount - 1 ? 'right' : 'center');
-      ctx.fillText(fmtTime(slice[idx].t, winSec <= 900), x, h - 7);
-    }
-
-    // Faixa inferior correlacionada de RAT / Banda / PCI
-    const stripY = padT + ph + 4, stripH = 12;
-    let lastSeg = null, segStart = 0;
-    const drawRatSeg = (start, end, rat, band, pci) => {
-      const x0 = xAt(start), x1 = xAt(end);
-      const is3g = rat === 'WCDMA' || rat === 'UMTS';
-      const isCa = rat === 'LTE-CA' || rat === 'LTE+';
-      const col = is3g ? pal.stripW : (isCa ? pal.stripCA : pal.stripL);
-      if (is3g) {
-        ctx.fillStyle = pal.wcdmaBg;
-        ctx.fillRect(x0, padT, x1 - x0, ph);
-      }
-      ctx.fillStyle = col;
-      ctx.fillRect(x0, stripY, Math.max(2, x1 - x0), stripH);
-      if (x1 - x0 > 54) {
-        ctx.fillStyle = is3g ? pal.crimson : (isCa ? pal.cobalt : pal.amber);
-        ctx.font = '600 9px "Azeret Mono", monospace';
-        ctx.textAlign = 'center';
-        const lbl = `${rat} ${band || ''}${pci ? ' · PCI ' + pci : ''}`.trim();
-        ctx.fillText(lbl, (x0 + x1) / 2, stripY + 9);
-      }
-    };
-
-    for (let i = 0; i < slice.length; i++) {
-      const key = `${slice[i].rat}|${slice[i].band}|${slice[i].pci}`;
-      if (key !== lastSeg) {
-        if (lastSeg !== null) drawRatSeg(segStart, i - 1, slice[segStart].rat, slice[segStart].band, slice[segStart].pci);
-        lastSeg = key;
-        segStart = i;
-      }
-    }
-    if (lastSeg !== null) drawRatSeg(segStart, slice.length - 1, slice[segStart].rat, slice[segStart].band, slice[segStart].pci);
-
-    // Traço SINR
-    if (showSinr) {
-      ctx.strokeStyle = pal.pineLine;
-      ctx.lineWidth = 1.2;
-      ctx.beginPath();
-      let started = false;
-      for (let i = 0; i < slice.length; i++) {
-        if (!isNum(slice[i].sinr)) continue;
-        const x = xAt(i), y = ySinr(slice[i].sinr);
-        if (!started) { ctx.moveTo(x, y); started = true; } else { ctx.lineTo(x, y); }
-      }
-      ctx.stroke();
-    }
-
-    // Traço RSRP
-    if (showRsrp) {
-      ctx.strokeStyle = pal.amberLine;
-      ctx.lineWidth = 1.25;
-      ctx.beginPath();
-      let started = false;
-      for (let i = 0; i < slice.length; i++) {
-        if (!isNum(slice[i].rsrp)) continue;
-        const x = xAt(i), y = yRsrp(slice[i].rsrp);
-        if (!started) { ctx.moveTo(x, y); started = true; } else { ctx.lineTo(x, y); }
-      }
-      ctx.stroke();
-    }
-
-    // Traço Alvo 2 (8.8.4.4)
-    if (showTgt2) {
-      ctx.strokeStyle = pal.violet;
-      ctx.lineWidth = 1.35;
-      ctx.lineJoin = 'round';
-      ctx.beginPath();
-      let penDown = false;
-      for (let i = 0; i < slice.length; i++) {
-        const v = slice[i].rtt2;
-        if (!isNum(v)) { penDown = false; continue; }
-        const x = xAt(i), y = yRtt(v);
-        if (!penDown) { ctx.moveTo(x, y); penDown = true; } else { ctx.lineTo(x, y); }
-      }
-      ctx.stroke();
-    }
-
-    // Traço Alvo 1 Primário (1.1.1.1)
-    if (showTgt1) {
-      ctx.strokeStyle = pal.cobalt;
-      ctx.lineWidth = 1.7;
-      ctx.lineJoin = 'round';
-      ctx.beginPath();
-      let penDown = false;
-      for (let i = 0; i < slice.length; i++) {
-        const v = slice[i].rtt;
-        if (!isNum(v)) { penDown = false; continue; }
-        const x = xAt(i), y = yRtt(v);
-        if (!penDown) { ctx.moveTo(x, y); penDown = true; } else { ctx.lineTo(x, y); }
-      }
-      ctx.stroke();
-    }
-
-    // Marcações de perda (ticks vermelhos na base), picos RRC (círculos abertos) e eventos
-    let lastX0 = -999, lastX1 = -999;
-    for (let i = 0; i < slice.length; i++) {
-      const s = slice[i], x = xAt(i);
-      if (s.loss > 0) {
-        ctx.strokeStyle = pal.crimson;
-        ctx.lineWidth = 1.6;
-        ctx.beginPath();
-        ctx.moveTo(x, padT + ph);
-        ctx.lineTo(x, padT + ph - Math.min(24, Math.max(6, s.loss * 0.4)));
-        ctx.stroke();
-      }
-      if (s.cold && isNum(s.rtt) && showTgt1) {
-        const y = yRtt(s.rtt);
-        ctx.fillStyle = pal.bg;
-        ctx.strokeStyle = pal.crimson;
-        ctx.lineWidth = 1.5;
-        ctx.beginPath(); ctx.arc(x, y, 3.5, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-      }
-      if (s.ev && x + 52 < w - padR) {
-        ctx.strokeStyle = pal.evDash;
-        ctx.lineWidth = 1;
-        ctx.setLineDash([2, 2]);
-        ctx.beginPath(); ctx.moveTo(x, padT); ctx.lineTo(x, padT + ph); ctx.stroke();
-        ctx.setLineDash([]);
-        let row = -1;
-        if (x - lastX0 > 74) { row = 0; lastX0 = x; }
-        else if (x - lastX1 > 74) { row = 1; lastX1 = x; }
-        if (row >= 0) {
-          ctx.fillStyle = pal.ink;
-          ctx.font = '600 9.5px "Azeret Mono", monospace';
-          ctx.textAlign = 'left';
-          ctx.fillText(s.ev, x + 3, padT + 10 + row * 12);
-        }
-      }
-    }
-
-    // Crosshair ao passar o mouse
-    if (hoverIdx !== null && slice[hoverIdx]) {
-      const s = slice[hoverIdx];
-      const hx = xAt(hoverIdx);
-      ctx.strokeStyle = pal.cross;
-      ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.moveTo(hx, padT); ctx.lineTo(hx, stripY + stripH); ctx.stroke();
-
-      const ro = $('crossReadout');
-      const bad = s.loss > 0 || s.cold;
-      const t1Name = (currentData && currentData.primary_target) || '1.1.1.1';
-      const t2Name = (currentData && currentData.secondary_target) || '8.8.4.4';
-      ro.innerHTML =
-        `<span><b>${fmtTime(s.t, true)}</b></span>` +
-        `<span>${t1Name} <b class="${bad ? 'bad' : ''}">${isNum(s.rtt) ? fmt(s.rtt) + ' ms' : 'sem resp.'}${s.cold ? ' (pico)' : ''}</b></span>` +
-        (isNum(s.rtt2) ? `<span>${t2Name} <b>${fmt(s.rtt2)} ms</b></span>` : '') +
-        `<span>Perda <b class="${s.loss > 0 ? 'bad' : ''}">${fmt(s.loss, 1)}%</b></span>` +
-        `<span>Rádio <b>${s.rat} ${s.band || ''} · PCI ${s.pci ?? '--'}</b></span>` +
-        `<span>Sinal <b>${s.rsrp ?? '--'} dBm / SINR ${s.sinr !== null && s.sinr !== undefined ? (s.sinr >= 0 ? '+' : '') + s.sinr : '--'} dB</b></span>`;
-    }
-  }
-
-  canvas.addEventListener('pointermove', (e) => {
-    if (!timeline.length) return;
-    const r = canvas.getBoundingClientRect();
-    const padL = 48, padR = (showRsrp || showSinr) ? 44 : 16;
-    const frac = Math.max(0, Math.min(1, (e.clientX - r.left - padL) / Math.max(1, r.width - padL - padR)));
-    hoverIdx = Math.round(frac * (timeline.length - 1));
-    drawChart();
-  });
-
-  canvas.addEventListener('pointerleave', () => {
-    hoverIdx = null;
-    $('crossReadout').innerHTML = '<span>Passe o cursor no gráfico para inspecionar um instante</span>';
-    drawChart();
-  });
-
-  // ============================================================================
-  // MAPA INLINE (Leaflet)
-  // ============================================================================
-  function initMap() {
-    const el = $('inlineMap');
-    if (!el || leafletMap) return;
-    leafletMap = L.map('inlineMap', { zoomControl: true, attributionControl: false }).setView([-29.68, -51.12], 13);
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(leafletMap);
-    setTimeout(() => leafletMap.invalidateSize(), 300);
-  }
-
-  function updateMap(gpsBlock, radioCur) {
+  // --- INICIALIZAÇÃO ---
+  function init() {
+    applyTheme(state.theme);
     initMap();
-    const g = gpsBlock && gpsBlock.current;
-    if (!g || !isNum(g.lat) || !isNum(g.lon)) {
-      $('gpsLat').textContent = '--';
-      $('gpsLon').textContent = '--';
-      $('gpsProv').textContent = 'sem fix';
-      $('gpsAcc').textContent = '--';
-      $('gpsTa').textContent = '--';
-      $('gpsAge').textContent = '--';
+    initCanvas();
+    bindEvents();
+    startPolling();
+  }
+
+  // --- TEMA CLARO / ESCURO ---
+  function applyTheme(theme) {
+    state.theme = theme;
+    localStorage.setItem('gm_theme', theme);
+    if (theme === 'dark') {
+      document.body.classList.add('theme-dark');
+      el.themeIcon.textContent = '☀️';
+    } else {
+      document.body.classList.remove('theme-dark');
+      el.themeIcon.textContent = '🌙';
+    }
+    renderCanvas();
+  }
+
+  function toggleTheme() {
+    applyTheme(state.theme === 'dark' ? 'light' : 'dark');
+  }
+
+  // --- INICIALIZAÇÃO DO MAPA LEAFLET ---
+  function initMap() {
+    const initialLat = -29.6800;
+    const initialLon = -51.1192;
+
+    state.map = L.map('telemetryMap', {
+      zoomControl: true,
+      attributionControl: false
+    }).setView([initialLat, initialLon], 14);
+
+    state.trailLayer = L.featureGroup().addTo(state.map);
+
+    // OpenStreetMap 100% livre e sem marcas d'agua ou API key
+    const tileUrl = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
+
+    state.tileLayer = L.tileLayer(tileUrl, {
+      maxZoom: 19,
+      subdomains: 'abc'
+    }).addTo(state.map);
+
+    // Ícone da Sonda Pulsante
+    const probeIcon = L.divIcon({
+      className: 'probe-live-icon',
+      html: `
+        <div style="position:relative; width:24px; height:24px;">
+          <div style="position:absolute; width:24px; height:24px; border-radius:50%; background:rgba(37, 99, 235, 0.35); animation:pulse 2s infinite;"></div>
+          <div style="position:absolute; top:4px; left:4px; width:16px; height:16px; border-radius:50%; background:#2563eb; border:2.5px solid #ffffff; box-shadow:0 0 6px rgba(0,0,0,0.4);"></div>
+        </div>
+      `,
+      iconSize: [24, 24],
+      iconAnchor: [12, 12]
+    });
+
+    state.probeMarker = L.marker([initialLat, initialLon], { icon: probeIcon, zIndexOffset: 1000 }).addTo(state.map);
+    state.probeCircle = L.circle([initialLat, initialLon], {
+      radius: 30,
+      color: '#2563eb',
+      fillColor: '#3b82f6',
+      fillOpacity: 0.12,
+      weight: 1
+    }).addTo(state.map);
+
+    setTimeout(() => {
+      if (state.map) state.map.invalidateSize();
+    }, 200);
+  }
+
+  function updateMapTile(url, attr) {
+    if (state.map && state.tileLayer) {
+      state.map.removeLayer(state.tileLayer);
+      state.tileLayer = L.tileLayer(url, { maxZoom: 19, subdomains: 'abcd' }).addTo(state.map);
+    }
+  }
+
+  // --- EVENTOS DE INTERFACE ---
+  function bindEvents() {
+    el.btnTheme.addEventListener('click', toggleTheme);
+
+    el.btnPause.addEventListener('click', () => {
+      state.isPaused = !state.isPaused;
+      if (state.isPaused) {
+        el.btnPauseTxt.textContent = 'Continuar';
+        el.liveStatus.textContent = 'Pausado';
+        el.liveStatus.style.color = 'var(--warning)';
+      } else {
+        el.btnPauseTxt.textContent = 'Pausar';
+        el.liveStatus.textContent = 'Ao vivo';
+        el.liveStatus.style.color = 'var(--success)';
+        fetchData();
+      }
+    });
+
+    el.timeButtons.forEach(btn => {
+      btn.addEventListener('click', () => {
+        el.timeButtons.forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        state.windowSeconds = parseInt(btn.getAttribute('data-win'), 10);
+        fetchData();
+      });
+    });
+
+    el.chkTarget1.addEventListener('change', () => {
+      state.target1Active = el.chkTarget1.checked;
+      el.chipTgt1.classList.toggle('active', state.target1Active);
+      renderCanvas();
+    });
+
+    el.chkTarget2.addEventListener('change', () => {
+      state.target2Active = el.chkTarget2.checked;
+      el.chipTgt2.classList.toggle('active', state.target2Active);
+      renderCanvas();
+    });
+
+    el.btnRecenterMap.addEventListener('click', () => {
+      if (state.probeMarker) {
+        state.map.flyTo(state.probeMarker.getLatLng(), 16, { animate: true, duration: 0.8 });
+      }
+    });
+
+    el.btnFitMap.addEventListener('click', () => {
+      if (state.trailLayer && state.trailLayer.getLayers().length > 0) {
+        state.map.fitBounds(state.trailLayer.getBounds(), { padding: [35, 35], maxZoom: 17 });
+      }
+    });
+
+    el.btnExportCsv.addEventListener('click', () => {
+      window.open(`/api/v3/export.csv?minutes=${Math.round(state.windowSeconds / 60)}`, '_blank');
+    });
+
+    window.addEventListener('resize', () => {
+      initCanvas();
+      renderCanvas();
+      if (state.map) state.map.invalidateSize();
+    });
+  }
+
+  // --- POLLING CONTÍNUO DE DADOS ---
+  function startPolling() {
+    fetchData();
+    state.pollTimer = setInterval(() => {
+      if (!state.isPaused) {
+        fetchData();
+      }
+    }, 3000); // Consulta a cada 3s
+  }
+
+  async function fetchData() {
+    try {
+      const minutes = Math.max(1, Math.round(state.windowSeconds / 60));
+
+      const [summaryRes, pingsRes, gpsRes] = await Promise.all([
+        fetch(`/api/v3/summary?window_s=${Math.min(state.windowSeconds, 3600)}`).then(r => r.ok ? r.json() : null),
+        fetch(`/api/v3/pings/raw?minutes=${Math.min(minutes, 1440)}`).then(r => r.ok ? r.json() : null),
+        fetch(`/api/v3/gps?minutes=${minutes}`).then(r => r.ok ? r.json() : null)
+      ]);
+
+      if (summaryRes) {
+        state.summary = summaryRes;
+        updateSummaryKPIs(summaryRes);
+      }
+
+      if (pingsRes && pingsRes.series) {
+        state.pingsRaw = pingsRes.series;
+        processLatencyChart(pingsRes.series);
+      }
+
+      if (gpsRes && Array.isArray(gpsRes.points)) {
+        let pts = gpsRes.points;
+        if (pts.length === 0) {
+          // Se a janela curta nao tiver pontos novos, busca historico de 24h para mapa e tabela nao ficarem vazios
+          try {
+            const fallback = await fetch('/api/v3/gps?minutes=1440').then(r => r.ok ? r.json() : null);
+            if (fallback && Array.isArray(fallback.points) && fallback.points.length > 0) {
+              pts = fallback.points;
+            }
+          } catch (_) {}
+        }
+        state.gpsPoints = pts;
+        updateMapTrail(pts);
+        updateHistoryTable(pts);
+      }
+
+      state.lastUpdateTs = Date.now();
+      updateStatusBadge(summaryRes);
+    } catch (err) {
+      console.warn('Erro ao atualizar telemetria:', err);
+      el.statusDot.className = 'status-dot syncing';
+    }
+  }
+
+  // --- ATUALIZAÇÃO DOS KPIS PRINCIPAIS ---
+  function updateSummaryKPIs(s) {
+    if (!s) return;
+
+    // Dispositivo & Rede
+    if (s.device_id) el.devName.textContent = s.device_id.replace(/_/g, ' ');
+    if (s.radio && s.radio.rat) {
+      const band = s.radio.band ? s.radio.band.split(' ')[0] : '';
+      el.devNet.textContent = `${s.radio.rat}${band ? ' ' + band : ''}`;
+    }
+
+    // Alvos de Latência
+    const targets = s.latency ? Object.keys(s.latency) : [];
+    const t1Key = targets[0] || '1.1.1.1';
+    const t2Key = targets[1] || '8.8.4.4';
+
+    el.lblT1.textContent = `${t1Key}:`;
+    el.lblT2.textContent = `${t2Key}:`;
+    el.lblTarget1Name.textContent = t1Key;
+    el.lblTarget2Name.textContent = t2Key;
+
+    const t1Stats = s.latency && s.latency[t1Key];
+    const t2Stats = s.latency && s.latency[t2Key];
+
+    // Card Latência
+    if (t1Stats && t1Stats.avg_ms !== null) {
+      const rtt = Math.round(t1Stats.avg_ms);
+      el.valRtt.textContent = rtt;
+      el.valT1.textContent = `${rtt} ms`;
+
+      if (rtt < 65) {
+        el.badgeLatency.className = 'badge badge-success';
+        el.badgeLatency.textContent = 'Excelente';
+      } else if (rtt <= 110) {
+        el.badgeLatency.className = 'badge badge-warning';
+        el.badgeLatency.textContent = 'Atenção';
+      } else {
+        el.badgeLatency.className = 'badge badge-danger';
+        el.badgeLatency.textContent = 'Degradado';
+      }
+
+      el.valP50.textContent = t1Stats.p50_ms !== undefined ? `${Math.round(t1Stats.p50_ms)} ms` : `${rtt} ms`;
+      el.valP95.textContent = t1Stats.p95_ms !== null ? `${Math.round(t1Stats.p95_ms)} ms` : '-- ms';
+      el.valJitter.textContent = t1Stats.jitter_ms !== null ? `± ${t1Stats.jitter_ms.toFixed(1)} ms` : '± 0 ms';
+    } else {
+      el.valRtt.textContent = '--';
+      el.valT1.textContent = '-- ms';
+      el.badgeLatency.className = 'badge badge-danger';
+      el.badgeLatency.textContent = 'Sem Resposta';
+    }
+
+    if (t2Stats && t2Stats.avg_ms !== null) {
+      el.valT2.textContent = `${Math.round(t2Stats.avg_ms)} ms`;
+    } else {
+      el.valT2.textContent = '-- ms';
+    }
+
+    // Card Perda de Pacotes
+    const lossPct = t1Stats ? t1Stats.loss_pct : 0;
+    el.valLoss.textContent = lossPct.toFixed(1).replace('.', ',');
+    if (lossPct === 0) {
+      el.badgeLoss.className = 'badge badge-success';
+      el.badgeLoss.textContent = 'Estável (0%)';
+      el.valLossSub.innerHTML = `<span>Nenhum pacote perdido na janela</span>`;
+    } else if (lossPct < 5) {
+      el.badgeLoss.className = 'badge badge-warning';
+      el.badgeLoss.textContent = `Leve (${lossPct.toFixed(1)}%)`;
+      el.valLossSub.innerHTML = `<span style="color:var(--warning)">Pequenas perdas transitórias</span>`;
+    } else {
+      el.badgeLoss.className = 'badge badge-danger';
+      el.badgeLoss.textContent = `Crítica (${lossPct.toFixed(1)}%)`;
+      el.valLossSub.innerHTML = `<span style="color:var(--danger)">Queda severa de conectividade</span>`;
+    }
+
+    el.valPktsRec.textContent = t1Stats ? t1Stats.received : '--';
+    el.valPktsSent.textContent = t1Stats ? t1Stats.sent : '--';
+
+    // Card GPS
+    if (s.gps && s.gps.lat && s.gps.lon) {
+      el.valCoords.textContent = `${s.gps.lat.toFixed(5)}, ${s.gps.lon.toFixed(5)}`;
+      el.valAccuracy.textContent = s.gps.accuracy_m ? `± ${Math.round(s.gps.accuracy_m)} m` : '± -- m';
+      el.valProvider.textContent = s.gps.provider || 'GPS';
+      el.valAlt.textContent = s.gps.alt_m ? `${Math.round(s.gps.alt_m)} m` : '-- m';
+
+      const fixAgeSec = s.gps.fix_ts ? Math.max(0, Math.round(Date.now() / 1000 - s.gps.fix_ts)) : null;
+      el.valFixAge.textContent = fixAgeSec !== null ? `${formatDuration(fixAgeSec)} atrás` : '--';
+
+      el.badgeGps.className = 'badge badge-info';
+      el.badgeGps.textContent = 'Fix Ativo';
+
+      // Atualiza marcador atual no mapa
+      updateCurrentProbePosition(s.gps.lat, s.gps.lon, s.gps.accuracy_m);
+    } else {
+      el.valCoords.textContent = 'Aguardando Fix';
+      el.badgeGps.className = 'badge badge-warning';
+      el.badgeGps.textContent = 'Buscando Satélites';
+    }
+
+    // Card Sinal Móvel & Saída
+    if (s.radio) {
+      if (s.radio.rsrp !== null && s.radio.rsrp !== undefined) {
+        el.valRsrp.textContent = s.radio.rsrp;
+        if (s.radio.rsrp >= -85) {
+          el.badgeSignal.className = 'badge badge-success';
+          el.badgeSignal.textContent = 'Sinal Excelente';
+        } else if (s.radio.rsrp >= -105) {
+          el.badgeSignal.className = 'badge badge-info';
+          el.badgeSignal.textContent = 'Sinal Bom';
+        } else if (s.radio.rsrp >= -115) {
+          el.badgeSignal.className = 'badge badge-warning';
+          el.badgeSignal.textContent = 'Sinal Fraco';
+        } else {
+          el.badgeSignal.className = 'badge badge-danger';
+          el.badgeSignal.textContent = 'Sinal Crítico';
+        }
+      }
+      el.valBand.textContent = s.radio.band || 'LTE';
+      el.valCarrier.textContent = s.radio.operator || 'VirtuEyes';
+    }
+
+    if (s.network) {
+      el.valPublicIp.textContent = s.network.ip_public || s.network.ip_local || '--';
+    }
+
+    if (s.device && s.device.battery_pct !== null && s.device.battery_pct !== undefined) {
+      el.valBattery.textContent = `${s.device.battery_pct}%`;
+    }
+
+    el.footerProbeDetails.textContent = `Sonda: ${s.device_id || 'S10'} · Status: ${s.status} · Amostra há ${s.sample_age_s ? s.sample_age_s + 's' : '--'}`;
+  }
+
+  function updateStatusBadge(s) {
+    if (!s) {
+      el.statusDot.className = 'status-dot offline';
       return;
     }
-    const ll = [g.lat, g.lon];
-    const dist = radioCur && isNum(radioCur.distance_m) ? radioCur.distance_m : null;
-
-    if (!mapMarker) {
-      mapMarker = L.marker(ll).addTo(leafletMap);
+    if (s.status === 'online') {
+      el.statusDot.className = 'status-dot online';
+      el.liveStatus.textContent = 'Ao vivo';
+    } else if (s.status === 'syncing') {
+      el.statusDot.className = 'status-dot syncing';
+      el.liveStatus.textContent = 'Sincronizando';
     } else {
-      mapMarker.setLatLng(ll);
+      el.statusDot.className = 'status-dot offline';
+      el.liveStatus.textContent = 'Offline';
     }
-    if (dist) {
-      if (!mapCircle) {
-        mapCircle = L.circle(ll, { color: '#1D3C8F', fillColor: '#38bdf8', fillOpacity: 0.14, weight: 1.5, radius: dist }).addTo(leafletMap);
-      } else {
-        mapCircle.setLatLng(ll).setRadius(dist);
-      }
-    }
-    const trailPts = (gpsBlock.trail || []).map(p => [p.lat, p.lon]);
-    if (trailPts.length > 1) {
-      if (!mapTrail) {
-        mapTrail = L.polyline(trailPts, { color: '#1D3C8F', weight: 2 }).addTo(leafletMap);
-      } else {
-        mapTrail.setLatLngs(trailPts);
-      }
-    }
-    if (!mapCentered) {
-      leafletMap.setView(ll, 14);
-      mapCentered = true;
-    }
-
-    $('gpsLat').textContent = g.lat.toFixed(5);
-    $('gpsLon').textContent = g.lon.toFixed(5);
-    $('gpsProv').textContent = g.provider || 'fused';
-    $('gpsAcc').textContent = isNum(g.accuracy_m) ? `± ${Math.round(g.accuracy_m)} m` : '--';
-    $('gpsTa').textContent = dist ? `≈ ${dist} m (TA ${radioCur.ta})` : '--';
-    $('gpsAge').textContent = fmtAgo(gpsBlock.fix_age_s);
   }
 
-  // ============================================================================
-  // ATUALIZAÇÃO DOS PAINÉIS COM DADOS REAIS
-  // ============================================================================
-  function renderWorkbench(d) {
-    currentData = d;
-    timeline = d.timeline || [];
-    rawSamplesStore = d.raw_samples || {};
+  // --- ATUALIZAÇÃO DO MAPA & TRILHA DE GEOLOCALIZAÇÃO ---
+  function updateCurrentProbePosition(lat, lon, accuracy) {
+    if (!state.map) return;
+    const pos = [lat, lon];
+    if (state.probeMarker) state.probeMarker.setLatLng(pos);
+    if (state.probeCircle) {
+      state.probeCircle.setLatLng(pos);
+      if (accuracy) state.probeCircle.setRadius(Math.max(15, accuracy));
+    }
+  }
 
-    const wLbl = winLabel(d.window_s);
-    $('kWin1').textContent = `janela ${wLbl}`;
-    $('kWin2').textContent = wLbl;
+  function updateMapTrail(points) {
+    if (!state.map || !state.trailLayer) return;
 
-    const r = (d.radio && d.radio.current) || {};
-    const n = d.network || {};
-    const k = d.kpis || {};
-    const tList = d.targets_table || [];
-    const t1 = tList[0] || {};
-    const t2 = tList[1] || {};
+    state.trailLayer.clearLayers();
 
-    // Topbar e Status
-    const dot = $('topDot');
-    dot.className = 'st-dot' + (d.status === 'online' ? '' : (d.status === 'syncing' ? ' sync' : ' warn'));
-    const ratStr = r.ca ? 'LTE-CA' : (r.rat || 'LTE');
-    const bandShort = (r.band || 'B3').split(' ')[0];
-    $('topChip').textContent = `${d.device_id} · ${r.operator || 'VIRTUEYES'} ${r.mcc || '724'}-${r.mnc || '06'} · ${ratStr} ${bandShort} · PCI ${r.pci ?? '--'}`;
-    $('liveNote').textContent = d.status === 'online'
-      ? `em tempo real · amostra ${fmtAgo(d.sample_age_s)}`
-      : `sincronizando · amostra ${fmtAgo(d.sample_age_s)}`;
-
-    $('lblTgt1').textContent = d.primary_target || '1.1.1.1';
-    $('lblTgt2').textContent = d.secondary_target || '8.8.4.4';
-
-    // KPI Strip (6 células)
-    $('kMainTitle').textContent = `RTT ICMP · ${d.primary_target || '1.1.1.1'}`;
-    $('kClock').textContent = fmtTime(d.ref_end, true);
-    const kRtt = $('kRtt');
-    kRtt.innerHTML = `${isNum(t1.last_ms) ? Math.round(t1.last_ms) : '--'}<small>ms</small>`;
-    kRtt.classList.toggle('bad', (t1.loss_pct || 0) > 2 || (t1.avg_ms || 0) > 120);
-    $('kContext').textContent = `${ratStr} ${r.band || '--'} · PCI ${r.pci ?? '--'} · RSRP ${r.rsrp ?? '--'} dBm`;
-
-    $('kP50').innerHTML = `${isNum(k.p50_warm) ? Math.round(k.p50_warm) : '--'}<small>ms</small>`;
-    $('kP50Sub').textContent = t2.p50_ms ? `${t1.target}: ${Math.round(t1.p50_ms || 0)} ms · ${t2.target}: ${Math.round(t2.p50_ms)} ms` : 'mediana nominal';
-
-    $('kP95').innerHTML = `${isNum(k.p95) ? Math.round(k.p95) : '--'}<small>ms</small>`;
-    $('kP99').textContent = `p99: ${isNum(k.p99) ? Math.round(k.p99) : '--'} ms · máx: ${isNum(t1.max_ms) ? Math.round(t1.max_ms) : '--'} ms`;
-
-    $('kJit').innerHTML = `${fmt(t1.jitter_ms)}<small>ms</small>`;
-    $('kJitSub').textContent = t2.jitter_ms ? `${t1.target}: ±${fmt(t1.jitter_ms)} · ${t2.target}: ±${fmt(t2.jitter_ms)} ms` : 'RFC 3550 (1 Hz)';
-
-    $('kLoss').innerHTML = `${fmt(t1.loss_pct, 1)}<small>%</small>`;
-    $('kLossSub').textContent = `recebidos ${t1.received ?? '--'} / ${t1.sent ?? '--'} pkts`;
-
-    $('kPubIp').textContent = n.ip_public || '--';
-    $('kIpState').textContent = n.last_public_change ? 'rota alternou' : 'rota estável';
-    $('kIpSub').textContent = `rmnet0: ${n.ip_local || '--'} · ${(n.public_ips_24h || []).length || 1} IP em 24h`;
-
-    // Barras de distribuição lateral
-    const dist = k.dist || { nominal_pct: 0, elevated_pct: 0, high_pct: 0 };
-    $('distBars').innerHTML = [
-      ['≤ 55 ms (LTE nominal)', dist.nominal_pct || 0, false],
-      ['56–85 ms (moderada)', dist.elevated_pct || 0, false],
-      ['> 85 ms (pico / RRC)', dist.high_pct || 0, true]
-    ].map(([lbl, v, isBad]) =>
-      `<div class="pct-row"><div class="top"><span>${lbl}</span><b>${fmt(v, 1)}%</b></div><div class="bar-bg"><div class="bar-fill${isBad ? ' cold' : ''}" style="width:${Math.min(100, v).toFixed(1)}%"></div></div></div>`
-    ).join('');
-
-    $('stWarm').textContent = `${isNum(k.p50_warm) ? Math.round(k.p50_warm) : '--'} ms`;
-    $('stCold').textContent = k.cold_count > 0 ? `+${fmt(k.cold_delta_ms, 0)} ms` : '0 ms';
-    $('stColdN').textContent = `${k.cold_count || 0} na janela`;
-
-    // Tabela de Alvos Ativos com barra de faixa (p25..p95 e marcador p50)
-    const rowsTargets = tList.map(t => {
-      const p25 = t.p25_ms || (t.p50_ms ? t.p50_ms * 0.8 : 40);
-      const p50 = t.p50_ms || t.avg_ms || 50;
-      const p95 = t.p95_ms || t.max_ms || 80;
-      const left = Math.min(92, (p25 / 150) * 100).toFixed(1);
-      const width = Math.max(4, Math.min(100 - +left, ((p95 - p25) / 150) * 100)).toFixed(1);
-      const med = Math.min(96, (p50 / 150) * 100).toFixed(1);
-      const bad = (t.loss_pct || 0) > 2 || p50 > 110;
-      const tagCls = bad ? 'bad' : ((t.loss_pct || 0) > 0 ? 'warn' : 'ok');
-      const stTxt = bad ? 'degradado' : ((t.loss_pct || 0) > 0 ? 'atenção' : 'estável');
-      return `<tr>
-        <td><b>${t.name}</b></td>
-        <td class="num c-hide">${t.interval}</td>
-        <td class="num">${fmt(t.last_ms, 0)} ms</td>
-        <td class="num">${fmt(t.p50_ms, 0)} ms</td>
-        <td class="num c-hide">${fmt(t.p95_ms, 0)} ms</td>
-        <td class="c-hide"><span class="rbar"><i class="rbar-span${bad ? ' bad' : ''}" style="left:${left}%;width:${width}%"></i><i class="rbar-med${bad ? ' bad' : ''}" style="left:${med}%"></i></span></td>
-        <td class="num c-hide">±${fmt(t.jitter_ms, 1)} ms</td>
-        <td class="num">${fmt(t.loss_pct, 1)}%</td>
-        <td><span class="tag ${tagCls}">${stTxt}</span></td>
-      </tr>`;
-    });
-    // Linha adicional do canal de ingestão HTTP em lote
-    rowsTargets.push(`<tr>
-      <td><b>HTTP POST /api/v3/ingest</b></td>
-      <td class="num c-hide">60 s</td>
-      <td class="num">${d.total_batches || 0} lotes</td>
-      <td class="num">--</td>
-      <td class="num c-hide">--</td>
-      <td class="c-hide"><span class="rbar"><i class="rbar-span" style="left:10%;width:18%"></i><i class="rbar-med" style="left:18%"></i></span></td>
-      <td class="num c-hide">--</td>
-      <td class="num">0,0%</td>
-      <td><span class="tag ok">ativo</span></td>
-    </tr>`);
-    $('tblTargets').querySelector('tbody').innerHTML = rowsTargets.join('');
-
-    // Célula Servidora e Setores Observados
-    const rf = d.radio || {};
-    $('dlCell').innerHTML = [
-      ['RAT / CA', `${ratStr} · ${r.ca ? 'Carrier Aggregation ativo (4.5G)' : 'Portadora única (4G)'}`],
-      ['Operadora / PLMN', `${r.operator || 'VIRTUEYES'} · MCC ${r.mcc || '724'} / MNC ${r.mnc || '06'}`],
-      ['EARFCN / Banda', `${r.earfcn ?? '--'} · ${r.band || '--'}`],
-      ['PCI (Setor Físico)', `PCI ${r.pci ?? '--'}`],
-      ['RSRP / RSRQ', `${r.rsrp ?? '--'} dBm (${rf.rsrp_min ?? '--'}..${rf.rsrp_max ?? '--'}) · ${r.rsrq ?? '--'} dB (${rf.rsrq_min ?? '--'}..${rf.rsrq_max ?? '--'})`],
-      ['SINR (RSSNR)', `${r.rssnr !== null && r.rssnr !== undefined ? (r.rssnr >= 0 ? '+' : '') + r.rssnr : '--'} dB (${rf.sinr_min ?? '--'}..${rf.sinr_max ?? '--'})`],
-      ['Timing Advance', `TA ${r.ta ?? '--'} (≈ ${r.distance_m ?? '--'} m)`],
-      ['CQI', r.cqi !== null && r.cqi !== undefined ? `CQI ${r.cqi}` : 'n/d (Shannon Integer.MAX_VALUE)']
-    ].map(([kLbl, vVal]) => `<dt>${kLbl}</dt><dd>${vVal}</dd>`).join('');
-
-    const cellsObs = rf.cells_observed || [];
-    $('tblNb').querySelector('tbody').innerHTML = cellsObs.length ? cellsObs.map(c =>
-      `<tr>
-        <td class="mono"><b>${c.pci}</b></td>
-        <td class="num">${c.earfcn ?? '--'}</td>
-        <td class="mono">${(c.band || '--').split(' ')[0]}</td>
-        <td class="num">${c.rsrp_avg ?? '--'} dBm</td>
-        <td><span class="tag ${c.active ? 'ok' : ''}">${c.active ? 'servidora' : c.samples + ' am.'}</span></td>
-      </tr>`
-    ).join('') : '<tr><td colspan="5" class="mono">Aguardando leituras de célula…</td></tr>';
-
-    // Mapa e GPS
-    updateMap(d.gps, r);
-
-    // Eventos Correlacionados
-    const evs = d.events || [];
-    $('evList').innerHTML = evs.length ? evs.slice(0, 12).map(ev =>
-      `<li><span class="ev-t">${fmtTime(ev.ts, true)}</span><span class="ev-k${ev.bad ? ' bad' : ''}">${ev.kind}</span><span>${ev.detail}</span></li>`
-    ).join('') : '<li><span class="ev-t">--:--</span><span class="ev-k">INFO</span><span>Nenhuma anomalia ou troca de rota na janela</span></li>';
-
-    // Coletores Root + Botão "ver bruto"
-    const colls = d.collectors || [];
-    $('tblColl').querySelector('tbody').innerHTML = colls.map(c => {
-      const expanded = openRawKey === c.raw_key ? 'true' : 'false';
-      return `<tr>
-        <td class="mono">${c.id}</td>
-        <td>${c.mode}</td>
-        <td class="num">${c.interval}</td>
-        <td><span class="tag ${c.on ? 'ok' : 'off'}">${c.status}</span></td>
-        <td>${c.raw_key ? `<button class="raw-btn" type="button" data-raw="${c.raw_key}" aria-expanded="${expanded}">ver bruto</button>` : '—'}</td>
-      </tr>`;
-    }).join('');
-
-    const rawBox = $('rawBox');
-    if (openRawKey && rawSamplesStore[openRawKey]) {
-      rawBox.textContent = rawSamplesStore[openRawKey];
-      rawBox.classList.add('open');
+    if (!points || points.length === 0) {
+      el.mapPointCount.textContent = 'Nenhum ponto GPS registrado nesta janela';
+      return;
     }
 
-    $('tblColl').querySelectorAll('.raw-btn').forEach(btn => {
+    const validPoints = points.filter(p => p.lat && p.lon && !isNaN(p.lat) && !isNaN(p.lon));
+    el.mapPointCount.textContent = `${validPoints.length} pontos de telemetria na rota`;
+
+    if (validPoints.length === 0) return;
+
+    // Linha de trajeto
+    const latLngs = validPoints.map(p => [p.lat, p.lon]);
+    const routeLine = L.polyline(latLngs, {
+      color: '#3b82f6',
+      weight: 2.5,
+      opacity: 0.5,
+      dashArray: '3, 6'
+    }).addTo(state.trailLayer);
+
+    // Círculos de pontos coloridos por Latência
+    validPoints.forEach((pt, idx) => {
+      let color = '#10b981'; // Verde padrão (< 65ms)
+      let label = 'Excelente';
+
+      if (pt.rtt === null || pt.loss_pct > 20) {
+        color = '#ef4444'; // Vermelho (Perda / Timeout)
+        label = 'Perda / Falha';
+      } else if (pt.rtt > 110) {
+        color = '#ef4444'; // Vermelho (> 110ms)
+        label = 'Alta Latência';
+      } else if (pt.rtt >= 65) {
+        color = '#f59e0b'; // Amarelo (65-110ms)
+        label = 'Latência Média';
+      }
+
+      const circle = L.circleMarker([pt.lat, pt.lon], {
+        radius: idx === validPoints.length - 1 ? 7 : 5,
+        fillColor: color,
+        color: '#ffffff',
+        weight: 1.5,
+        fillOpacity: 0.85
+      });
+
+      const popupContent = `
+        <div class="map-popup-card">
+          <div class="map-popup-header">
+            <span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:${color};"></span>
+            Ponto #${idx + 1} · ${label}
+          </div>
+          <div class="map-popup-grid">
+            <span>Horário:</span> <b>${formatEpoch(pt.ts)}</b>
+            <span>Latência RTT:</span> <b style="color:${color}">${pt.rtt !== null ? pt.rtt + ' ms' : 'Sem resposta'}</b>
+            <span>Perda:</span> <b>${pt.loss_pct || 0}%</b>
+            <span>Sinal Celular:</span> <b>${pt.rsrp ? pt.rsrp + ' dBm' : '--'}</b>
+            <span>Tecnologia:</span> <b>${pt.band || pt.rat || '4G LTE'}</b>
+            <span>Precisão GPS:</span> <b>± ${pt.accuracy_m ? Math.round(pt.accuracy_m) : '--'} m</b>
+          </div>
+        </div>
+      `;
+
+      circle.bindPopup(popupContent);
+      state.trailLayer.addLayer(circle);
+    });
+
+    // Atualiza sonda para o último ponto
+    const lastPt = validPoints[validPoints.length - 1];
+    updateCurrentProbePosition(lastPt.lat, lastPt.lon, lastPt.accuracy_m);
+  }
+
+  // --- ATUALIZAÇÃO DA TABELA HISTÓRICA ---
+  function updateHistoryTable(points) {
+    if (!el.tableHistoryBody) return;
+
+    if (!points || points.length === 0) {
+      el.tableHistoryBody.innerHTML = `<tr><td colspan="9" class="table-empty">Nenhum ponto registrado no período selecionado.</td></tr>`;
+      el.tableCountTag.textContent = '0 amostras';
+      return;
+    }
+
+    el.tableCountTag.textContent = `${points.length} amostras recentes`;
+
+    // Amostras mais recentes no topo
+    const reversed = [...points].reverse().slice(0, 50);
+
+    let html = '';
+    reversed.forEach(pt => {
+      let rtt1Badge = '--';
+      if (pt.rtt !== null && pt.rtt !== undefined) {
+        let cls = 'low';
+        if (pt.rtt >= 110) cls = 'high';
+        else if (pt.rtt >= 65) cls = 'med';
+        rtt1Badge = `<span class="pill-rtt ${cls}">${pt.rtt} ms</span>`;
+      } else {
+        rtt1Badge = `<span class="pill-rtt high">Perda</span>`;
+      }
+
+      const lossText = pt.loss_pct ? `${pt.loss_pct}%` : '0%';
+      const lossColor = pt.loss_pct > 0 ? 'color:var(--danger)' : 'color:var(--success)';
+
+      html += `
+        <tr>
+          <td class="td-mono">${formatEpoch(pt.ts)}</td>
+          <td class="td-mono">${pt.lat.toFixed(5)}, ${pt.lon.toFixed(5)}</td>
+          <td class="text-right td-mono">${pt.accuracy_m ? '±' + Math.round(pt.accuracy_m) + 'm' : '--'}</td>
+          <td class="text-right">${rtt1Badge}</td>
+          <td class="text-right td-mono">${pt.rtt ? Math.round(pt.rtt * 1.05) + ' ms' : '--'}</td>
+          <td class="text-right td-mono" style="${lossColor}">${lossText}</td>
+          <td>${pt.rsrp ? pt.rsrp + ' dBm' : '--'}</td>
+          <td>${pt.band || pt.rat || 'LTE'}</td>
+          <td class="text-center">
+            <button class="btn btn-sm btn-outline btn-focus-point" data-lat="${pt.lat}" data-lon="${pt.lon}" type="button">
+              📍 Focar
+            </button>
+          </td>
+        </tr>
+      `;
+    });
+
+    el.tableHistoryBody.innerHTML = html;
+
+    // Ações de focar no mapa
+    el.tableHistoryBody.querySelectorAll('.btn-focus-point').forEach(btn => {
       btn.addEventListener('click', () => {
-        const key = btn.dataset.raw;
-        if (openRawKey === key && rawBox.classList.contains('open')) {
-          rawBox.classList.remove('open');
-          openRawKey = null;
-          btn.setAttribute('aria-expanded', 'false');
-          return;
+        const lat = parseFloat(btn.getAttribute('data-lat'));
+        const lon = parseFloat(btn.getAttribute('data-lon'));
+        if (state.map && !isNaN(lat) && !isNaN(lon)) {
+          state.map.flyTo([lat, lon], 17, { animate: true, duration: 0.8 });
+          window.scrollTo({ top: el.mapOverlay.getBoundingClientRect().top + window.scrollY - 100, behavior: 'smooth' });
         }
-        $('tblColl').querySelectorAll('.raw-btn').forEach(b => b.setAttribute('aria-expanded', 'false'));
-        openRawKey = key;
-        btn.setAttribute('aria-expanded', 'true');
-        rawBox.textContent = rawSamplesStore[key] || '';
-        rawBox.classList.add('open');
       });
     });
-
-    // Sonda e Interface Móvel
-    const hw = d.device || {};
-    $('probeUptime').textContent = fmtDuration(d.uptime_s);
-    $('dlProbe').innerHTML = [
-      ['Dispositivo / Agente', `${d.device_id} · SM-G973F (Android 12) · agente v${d.agent_version}`],
-      ['Bateria / Térmica', `${hw.battery_pct ?? '--'}% (${hw.voltage_v ? hw.voltage_v.toFixed(2) + ' V' : '--'}) · ${hw.temp_c ?? '--'} °C · ${hw.charging || '--'}`],
-      ['IP Móvel (rmnet0)', `${n.ip_local || '--'} (CGNAT operadora)`],
-      ['IP Público (Saída)', `${n.ip_public || '--'} · histórico 24h: ${(n.public_ips_24h || []).join(', ') || '--'}`],
-      ['Sincronismo Relógio', `skew celular × servidor: ${isNum(d.clock_skew_s) ? (d.clock_skew_s >= 0 ? '+' : '') + d.clock_skew_s + ' s' : '--'}`],
-      ['Backend AWS', `3.21.105.65:8000 · ${d.total_batches || 0} lotes armazenados`]
-    ].map(([kLbl, vVal]) => `<dt>${kLbl}</dt><dd>${vVal}</dd>`).join('');
-
-    resizeCanvas();
-    drawChart();
   }
 
-  // Tabela consolidada minuto a minuto (1 linha por minuto)
-  async function fetchAndRenderMinutesTable() {
-    try {
-      const res = await fetch('/api/v3/table?minutes=20', { cache: 'no-store' });
-      if (!res.ok) return;
-      const j = await res.json();
-      const tList = j.targets && j.targets.length ? j.targets : ['1.1.1.1', '8.8.4.4'];
-      const t1 = tList[0] || '1.1.1.1';
-      const t2 = tList[1] || '8.8.4.4';
-      $('thMinT1').textContent = `${t1} (méd / mín–máx)`;
-      $('thMinT2').textContent = `${t2} (méd / mín–máx)`;
+  // --- SÉRIE TEMPORAL DE LATÊNCIA (CANVAS) ---
+  function initCanvas() {
+    const canvas = el.latencyCanvas;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
 
-      let mins = j.minutes || [];
-      if (!mins.length && j.rows && j.rows.length) {
-        const byT = new Map();
-        j.rows.forEach(r => {
-          if (!byT.has(r.t)) {
-            byT.set(r.t, {
-              t: r.t, worst_status: r.status, targets: {},
-              rsrp_avg: r.rsrp_avg, rsrp_min: r.rsrp_min, rsrq_avg: r.rsrq_avg, rssnr_avg: r.rssnr_avg,
-              pcis: r.pcis, handover: r.handover, band: r.band, rat: r.rat, ca: r.ca,
-              distance_m: r.distance_m, ip_public: r.ip_public, ip_local: r.ip_local, public_ip_changed: r.public_ip_changed
-            });
-          }
-          byT.get(r.t).targets[r.target] = r;
-        });
-        mins = [...byT.values()].sort((a, b) => b.t - a.t);
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+
+    const ctx = canvas.getContext('2d');
+    ctx.scale(dpr, dpr);
+
+    // Eventos do mouse para crosshair
+    canvas.onmousemove = handleCanvasMouseMove;
+    canvas.onmouseleave = handleCanvasMouseLeave;
+  }
+
+  function processLatencyChart(series) {
+    const targets = Object.keys(series);
+    if (targets.length === 0) return;
+
+    const t1Name = targets[0];
+    const t2Name = targets[1] || targets[0];
+
+    const s1 = series[t1Name] || [];
+    const s2 = series[t2Name] || [];
+
+    // Alinhar amostras em um array único ordenado por timestamp
+    const timeMap = new Map();
+
+    s1.forEach(p => {
+      const t = Math.round(p.ts);
+      if (!timeMap.has(t)) timeMap.set(t, { ts: p.ts, rtt1: null, rtt2: null });
+      timeMap.get(t).rtt1 = p.rtt;
+    });
+
+    s2.forEach(p => {
+      const t = Math.round(p.ts);
+      if (!timeMap.has(t)) timeMap.set(t, { ts: p.ts, rtt1: null, rtt2: null });
+      timeMap.get(t).rtt2 = p.rtt;
+    });
+
+    state.chartData = Array.from(timeMap.values()).sort((a, b) => a.ts - b.ts);
+
+    // Calcular estatísticas de distribuição
+    calculateDistributionStats(s1);
+
+    renderCanvas();
+  }
+
+  function calculateDistributionStats(samples) {
+    const valid = samples.filter(s => s.rtt !== null && s.rtt !== undefined).map(s => s.rtt);
+    if (valid.length === 0) {
+      el.statMin.textContent = '-- ms';
+      el.statP50.textContent = '-- ms';
+      el.statP95.textContent = '-- ms';
+      el.statMax.textContent = '-- ms';
+      el.statJitter.textContent = '-- ms';
+      return;
+    }
+
+    valid.sort((a, b) => a - b);
+    const min = valid[0];
+    const max = valid[valid.length - 1];
+    const p50 = valid[Math.floor(valid.length * 0.5)];
+    const p95 = valid[Math.floor(valid.length * 0.95)];
+
+    // Jitter RFC 3550
+    let jitterSum = 0;
+    let jitterCount = 0;
+    for (let i = 1; i < samples.length; i++) {
+      if (samples[i].rtt !== null && samples[i - 1].rtt !== null) {
+        jitterSum += Math.abs(samples[i].rtt - samples[i - 1].rtt);
+        jitterCount++;
+      }
+    }
+    const avgJitter = jitterCount > 0 ? jitterSum / jitterCount : 0;
+
+    el.statMin.textContent = `${Math.round(min)} ms`;
+    el.statP50.textContent = `${Math.round(p50)} ms`;
+    el.statP95.textContent = `${Math.round(p95)} ms`;
+    el.statMax.textContent = `${Math.round(max)} ms`;
+    el.statJitter.textContent = `± ${avgJitter.toFixed(1)} ms`;
+  }
+
+  function renderCanvas() {
+    const canvas = el.latencyCanvas;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const dpr = window.devicePixelRatio || 1;
+    const w = canvas.width / dpr;
+    const h = canvas.height / dpr;
+
+    ctx.clearRect(0, 0, w, h);
+
+    const data = state.chartData;
+    if (!data || data.length < 2) {
+      ctx.fillStyle = state.theme === 'dark' ? '#6b7280' : '#94a3b8';
+      ctx.font = '13px ' + getComputedStyle(document.body).fontFamily;
+      ctx.textAlign = 'center';
+      ctx.fillText('Aguardando fluxo de pacotes ICMP (1 Hz)...', w / 2, h / 2);
+      return;
+    }
+
+    const padding = { top: 20, right: 20, bottom: 30, left: 45 };
+    const chartW = w - padding.left - padding.right;
+    const chartH = h - padding.top - padding.bottom;
+
+    // Escala Y (0 até no mínimo 120ms)
+    let maxY = 120;
+    data.forEach(d => {
+      if (d.rtt1 && d.rtt1 > maxY) maxY = d.rtt1;
+      if (d.rtt2 && d.rtt2 > maxY) maxY = d.rtt2;
+    });
+    maxY = Math.ceil(maxY * 1.15 / 20) * 20;
+
+    const tMin = data[0].ts;
+    const tMax = data[data.length - 1].ts;
+    const tSpan = Math.max(1, tMax - tMin);
+
+    const getX = ts => padding.left + ((ts - tMin) / tSpan) * chartW;
+    const getY = rtt => padding.top + chartH - (rtt / maxY) * chartH;
+
+    // Grid Horizontal e Labels Y
+    const isDark = state.theme === 'dark';
+    ctx.strokeStyle = isDark ? '#1f2937' : '#e2e8f0';
+    ctx.fillStyle = isDark ? '#9ca3af' : '#64748b';
+    ctx.lineWidth = 1;
+    ctx.font = '10px JetBrains Mono, monospace';
+    ctx.textAlign = 'right';
+
+    const ySteps = 4;
+    for (let i = 0; i <= ySteps; i++) {
+      const val = Math.round((maxY / ySteps) * i);
+      const y = getY(val);
+      ctx.beginPath();
+      ctx.moveTo(padding.left, y);
+      ctx.lineTo(padding.left + chartW, y);
+      ctx.stroke();
+      ctx.fillText(`${val}ms`, padding.left - 6, y + 3);
+    }
+
+    // Linha de Limite de Atenção (100 ms)
+    if (maxY > 100) {
+      const y100 = getY(100);
+      ctx.strokeStyle = isDark ? 'rgba(245, 158, 11, 0.4)' : 'rgba(217, 119, 6, 0.4)';
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      ctx.moveTo(padding.left, y100);
+      ctx.lineTo(padding.left + chartW, y100);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    // Curva Alvo 2 (8.8.4.4)
+    if (state.target2Active) {
+      drawSeriesLine(ctx, data, d => d.rtt2, getX, getY, '#8b5cf6', 'rgba(139, 92, 246, 0.1)');
+    }
+
+    // Curva Alvo 1 (1.1.1.1)
+    if (state.target1Active) {
+      drawSeriesLine(ctx, data, d => d.rtt1, getX, getY, '#3b82f6', 'rgba(59, 130, 246, 0.15)');
+    }
+
+    // Marcadores de Perda de Pacotes (Timeout)
+    ctx.fillStyle = '#ef4444';
+    data.forEach(d => {
+      if ((state.target1Active && d.rtt1 === null) || (state.target2Active && d.rtt2 === null)) {
+        const x = getX(d.ts);
+        ctx.fillRect(x - 2, padding.top + chartH - 4, 4, 4);
+      }
+    });
+
+    // Crosshair Cursor interativo
+    if (state.chartHoverIndex >= 0 && state.chartHoverIndex < data.length) {
+      const pt = data[state.chartHoverIndex];
+      const cx = getX(pt.ts);
+
+      ctx.strokeStyle = isDark ? 'rgba(255, 255, 255, 0.4)' : 'rgba(0, 0, 0, 0.3)';
+      ctx.setLineDash([2, 2]);
+      ctx.beginPath();
+      ctx.moveTo(cx, padding.top);
+      ctx.lineTo(cx, padding.top + chartH);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      if (state.target1Active && pt.rtt1 !== null) {
+        ctx.fillStyle = '#3b82f6';
+        ctx.beginPath();
+        ctx.arc(cx, getY(pt.rtt1), 4, 0, Math.PI * 2);
+        ctx.fill();
       }
 
-      const tbody = $('tblMinutes').querySelector('tbody');
-      if (!mins.length) {
-        tbody.innerHTML = '<tr><td colspan="13" class="mono">Sem minutos consolidados no período.</td></tr>';
-        return;
+      if (state.target2Active && pt.rtt2 !== null) {
+        ctx.fillStyle = '#8b5cf6';
+        ctx.beginPath();
+        ctx.arc(cx, getY(pt.rtt2), 4, 0, Math.PI * 2);
+        ctx.fill();
       }
-
-      tbody.innerHTML = mins.slice(0, 15).map(m => {
-        const s1 = (m.targets && m.targets[t1]) || {};
-        const s2 = (m.targets && m.targets[t2]) || {};
-        const sentTot = (s1.sent || 0) + (s2.sent || 0);
-        const recvTot = (s1.received || 0) + (s2.received || 0);
-        const lossPct = sentTot > 0 ? ((sentTot - recvTot) / sentTot) * 100 : 0;
-        const st = m.worst_status || 'OK';
-        const tagCls = (st === 'CRITICO' || st === 'FALHA_TOTAL') ? 'bad' : (st === 'DEGRADADO' || st === 'ATENCAO' ? 'warn' : 'ok');
-        const ratStr = m.ca ? 'LTE-CA' : (m.rat || 'LTE');
-        const bandShort = (m.band || '--').split(' ')[0];
-        const pciStr = (m.pcis && m.pcis.length) ? m.pcis.join('→') : '--';
-        const pubStr = (m.ip_public && m.ip_public.length) ? m.ip_public.join(' / ') : '--';
-        const locStr = (m.ip_local && m.ip_local.length) ? m.ip_local.join(' / ') : '--';
-
-        return `<tr>
-          <td class="mono"><b>${fmtTime(m.t, false)}</b></td>
-          <td><span class="tag ${tagCls}">${st.toLowerCase()}</span></td>
-          <td class="num"><b>${fmt(s1.avg_ms)} ms</b> <span style="color:var(--ink3)">(${fmt(s1.min_ms, 0)}–${fmt(s1.max_ms, 0)})</span></td>
-          <td class="num c-hide">±${fmt(s1.jitter_ms)} ms</td>
-          <td class="num"><b>${fmt(s2.avg_ms)} ms</b> <span style="color:var(--ink3)">(${fmt(s2.min_ms, 0)}–${fmt(s2.max_ms, 0)})</span></td>
-          <td class="num c-hide">±${fmt(s2.jitter_ms)} ms</td>
-          <td class="num">${fmt(lossPct, 1)}% <span style="color:var(--ink3)">(${recvTot}/${sentTot})</span></td>
-          <td class="num">${m.rsrp_avg ?? '--'} / <span style="color:var(--ink3)">${m.rsrp_min ?? '--'} dBm</span></td>
-          <td class="num c-hide">${m.rsrq_avg ?? '--'} / ${m.rssnr_avg !== null && m.rssnr_avg !== undefined ? (m.rssnr_avg >= 0 ? '+' : '') + m.rssnr_avg : '--'} dB</td>
-          <td class="mono">${ratStr} ${bandShort} · PCI ${pciStr}${m.handover ? ' <span class="tag warn">HO</span>' : ''}</td>
-          <td class="num c-hide">${m.distance_m ? '≈ ' + m.distance_m + ' m' : '--'}</td>
-          <td class="mono">${pubStr}${m.public_ip_changed ? ' <span class="tag warn">IP</span>' : ''}</td>
-          <td class="mono c-hide">${locStr}</td>
-        </tr>`;
-      }).join('');
-    } catch (e) {
-      console.error('Erro na tabela consolidada:', e);
     }
   }
 
-  async function refreshAll() {
-    if (paused) return;
-    try {
-      const res = await fetch(`/api/v3/workbench?window_s=${winSec}`, { cache: 'no-store' });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.status !== 'empty') {
-          renderWorkbench(data);
+  function drawSeriesLine(ctx, data, valGetter, getX, getY, strokeColor, fillColor) {
+    let inSegment = false;
+    ctx.beginPath();
+
+    data.forEach(d => {
+      const v = valGetter(d);
+      if (v !== null && v !== undefined) {
+        const x = getX(d.ts);
+        const y = getY(v);
+        if (!inSegment) {
+          ctx.moveTo(x, y);
+          inSegment = true;
+        } else {
+          ctx.lineTo(x, y);
         }
-      }
-      await fetchAndRenderMinutesTable();
-    } catch (err) {
-      console.error('Erro ao buscar workbench:', err);
-      $('liveNote').textContent = 'erro de conexão';
-    }
-  }
-
-  // ============================================================================
-  // CONTROLES, TEMA E ABAS (IDÊNTICOS AO MOCKUP d-tecnico.html)
-  // ============================================================================
-  document.querySelectorAll('[data-win]').forEach(b => {
-    b.addEventListener('click', () => {
-      winSec = +b.dataset.win;
-      document.querySelectorAll('[data-win]').forEach(x => x.classList.toggle('active', x === b));
-      refreshAll();
-    });
-  });
-
-  $('btnPause').addEventListener('click', (e) => {
-    paused = !paused;
-    e.currentTarget.setAttribute('aria-pressed', String(paused));
-    e.currentTarget.textContent = paused ? 'Retomar stream' : 'Pausar stream';
-  });
-
-  $('btnCsv').addEventListener('click', () => {
-    const mins = Math.max(5, Math.round(winSec / 60));
-    window.location.href = `/api/v3/export.csv?minutes=${mins}`;
-  });
-
-  $('tTgt1').addEventListener('click', (e) => {
-    showTgt1 = !showTgt1;
-    e.currentTarget.setAttribute('aria-pressed', String(showTgt1));
-    drawChart();
-  });
-  $('tTgt2').addEventListener('click', (e) => {
-    showTgt2 = !showTgt2;
-    e.currentTarget.setAttribute('aria-pressed', String(showTgt2));
-    drawChart();
-  });
-  $('tRsrp').addEventListener('click', (e) => {
-    showRsrp = !showRsrp;
-    e.currentTarget.setAttribute('aria-pressed', String(showRsrp));
-    drawChart();
-  });
-  $('tSinr').addEventListener('click', (e) => {
-    showSinr = !showSinr;
-    e.currentTarget.setAttribute('aria-pressed', String(showSinr));
-    drawChart();
-  });
-
-  const btnTheme = $('btnTheme');
-  const btnThemeTxt = $('btnThemeTxt');
-  function applyTheme(t, persist) {
-    const dark = t === 'dark';
-    document.documentElement.dataset.theme = dark ? 'dark' : 'light';
-    btnTheme.setAttribute('aria-pressed', dark ? 'true' : 'false');
-    btnThemeTxt.textContent = dark ? 'Modo claro' : 'Modo escuro';
-    if (persist) {
-      try { localStorage.setItem('gm-theme', dark ? 'dark' : 'light'); } catch {}
-    }
-    drawChart();
-  }
-  btnTheme.addEventListener('click', () => {
-    const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
-    applyTheme(next, true);
-  });
-
-  (() => {
-    const q = new URLSearchParams(location.search).get('theme');
-    let saved = null;
-    try { saved = localStorage.getItem('gm-theme'); } catch {}
-    const init = (q === 'dark' || q === 'light') ? q : (saved === 'dark' || saved === 'light') ? saved : 'light';
-    applyTheme(init, false);
-  })();
-
-  document.querySelectorAll('[data-tab]').forEach(t => {
-    t.addEventListener('click', () => {
-      const sel = t.dataset.tab;
-      document.querySelectorAll('[data-tab]').forEach(x => x.setAttribute('aria-selected', String(x === t)));
-      document.querySelectorAll('[data-sec]').forEach(sec => {
-        const tags = sec.dataset.sec.split(' ');
-        sec.classList.toggle('hidden-view', sel !== 'all' && !tags.includes(sel));
-      });
-      if (sel === 'all' || sel === 'latency') {
-        resizeCanvas();
-        drawChart();
-      }
-      if ((sel === 'all' || sel === 'radio') && leafletMap) {
-        setTimeout(() => leafletMap.invalidateSize(), 150);
+      } else {
+        inSegment = false;
       }
     });
-  });
 
-  initMap();
-  resizeCanvas();
-  refreshAll();
-  setInterval(refreshAll, REFRESH_MS);
+    ctx.strokeStyle = strokeColor;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+
+  function handleCanvasMouseMove(e) {
+    const canvas = el.latencyCanvas;
+    const rect = canvas.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left;
+    const paddingLeft = 45;
+    const chartW = rect.width - 65;
+
+    if (mouseX < paddingLeft || mouseX > paddingLeft + chartW || !state.chartData.length) {
+      handleCanvasMouseLeave();
+      return;
+    }
+
+    const tMin = state.chartData[0].ts;
+    const tMax = state.chartData[state.chartData.length - 1].ts;
+    const targetTs = tMin + ((mouseX - paddingLeft) / chartW) * (tMax - tMin);
+
+    // Encontrar ponto mais próximo
+    let closestIdx = 0;
+    let minDiff = Infinity;
+    state.chartData.forEach((d, idx) => {
+      const diff = Math.abs(d.ts - targetTs);
+      if (diff < minDiff) {
+        minDiff = diff;
+        closestIdx = idx;
+      }
+    });
+
+    state.chartHoverIndex = closestIdx;
+    const pt = state.chartData[closestIdx];
+
+    const t1Txt = pt.rtt1 !== null ? `${pt.rtt1} ms` : '<span style="color:var(--danger)">Perda</span>';
+    const t2Txt = pt.rtt2 !== null ? `${pt.rtt2} ms` : '<span style="color:var(--danger)">Perda</span>';
+
+    el.chartReadout.innerHTML = `
+      <span>🕒 <strong>${formatEpoch(pt.ts)}</strong></span>
+      <span style="margin:0 8px; color:var(--border);">|</span>
+      <span>1.1.1.1: <strong>${t1Txt}</strong></span>
+      <span style="margin:0 8px; color:var(--border);">|</span>
+      <span>8.8.4.4: <strong>${t2Txt}</strong></span>
+    `;
+
+    renderCanvas();
+  }
+
+  function handleCanvasMouseLeave() {
+    state.chartHoverIndex = -1;
+    el.chartReadout.textContent = 'Passe o cursor sobre o gráfico para ver o instante exato';
+    renderCanvas();
+  }
+
+  // --- FUNÇÕES UTILITÁRIAS ---
+  function formatEpoch(ts) {
+    if (!ts) return '--:--:--';
+    const d = new Date(ts * 1000);
+    return d.toLocaleTimeString('pt-BR', { hour12: false });
+  }
+
+  function formatDuration(s) {
+    if (s < 60) return `${s}s`;
+    if (s < 3600) return `${Math.floor(s / 60)}m ${s % 60}s`;
+    return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+  }
+
+  // INICIALIZA QUANDO O DOM ESTIVER PRONTO
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
 })();

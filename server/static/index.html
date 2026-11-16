@@ -1,271 +1,299 @@
 <!doctype html>
 <html lang="pt-BR">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>grafenomonitor · Análise Técnica de Latência Móvel (S10)</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@75..100,400..700&family=Azeret+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
-<link rel="stylesheet" href="/static/styles.css?v=3.2.0">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>grafenomonitor · Latência & Geolocalização</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  <link rel="stylesheet" href="/static/styles.css?v=4.0.0">
 </head>
-<body>
+<body class="theme-dark">
 
-<header class="topbar">
-  <div class="brand">
-    <h1>grafenomonitor</h1>
-    <div class="probe-chip">
-      <i class="st-dot" id="topDot" aria-hidden="true"></i>
-      <span id="topChip">samsung_s10_beyond1 · VIRTUEYES · LTE+ B3 · PCI 149</span>
-    </div>
-  </div>
-  <div class="actions">
-    <div class="seg" role="group" aria-label="Janela de tempo">
-      <button type="button" data-win="300">5 min</button>
-      <button type="button" class="active" data-win="900">15 min</button>
-      <button type="button" data-win="3600">1 h</button>
-      <button type="button" data-win="21600">6 h</button>
-    </div>
-    <button class="btn" id="btnPause" type="button" aria-pressed="false">Pausar stream</button>
-    <button class="btn" id="btnCsv" type="button">Exportar CSV</button>
-    <button class="btn btn-theme" id="btnTheme" type="button" aria-pressed="false" title="Alternar tema claro/escuro">
-      <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-        <circle cx="8" cy="8" r="5.5"/><path d="M8 2.5a5.5 5.5 0 0 0 0 11z" fill="currentColor" stroke="none"/>
-      </svg>
-      <span id="btnThemeTxt">Modo escuro</span>
-    </button>
-    <span class="sim-note" id="liveNote">conectando…</span>
-  </div>
-</header>
-
-<nav class="tabs" aria-label="Seções da bancada">
-  <div class="tab-list" role="tablist">
-    <button class="tab" role="tab" aria-selected="true" data-tab="all">Visão geral</button>
-    <button class="tab" role="tab" aria-selected="false" data-tab="latency">Latência e alvos</button>
-    <button class="tab" role="tab" aria-selected="false" data-tab="radio">Rádio, células e GPS</button>
-    <button class="tab" role="tab" aria-selected="false" data-tab="collectors">Coletores root e sonda</button>
-  </div>
-  <span class="tab-meta" id="probeMeta">SM-G973F (Exynos/Shannon) · Android 12 · AWS 3.21.105.65:8000 · ICMP 1 Hz</span>
-</nav>
-
-<section class="kpi-strip" aria-label="Resumo de latência e enlace">
-  <div class="kpi main">
-    <div class="k"><span id="kMainTitle">RTT ICMP · 1.1.1.1</span><span id="kClock">--:--:--</span></div>
-    <div class="v" id="kRtt">--<small>ms</small></div>
-    <div class="sub" id="kContext">LTE+ B3 · PCI 149 · RSRP -- dBm</div>
-  </div>
-  <div class="kpi">
-    <div class="k"><span>Mediana (p50)</span><span id="kWin1">janela 15m</span></div>
-    <div class="v" id="kP50">--<small>ms</small></div>
-    <div class="sub" id="kP50Sub">quentes (excl. picos RRC)</div>
-  </div>
-  <div class="kpi">
-    <div class="k"><span>Cauda (p95 / p99)</span><span id="kWin2">15m</span></div>
-    <div class="v" id="kP95">--<small>ms</small></div>
-    <div class="sub" id="kP99">p99: -- ms</div>
-  </div>
-  <div class="kpi">
-    <div class="k"><span>Jitter (RFC 3550)</span><span>1 Hz contínuo</span></div>
-    <div class="v" id="kJit">--<small>ms</small></div>
-    <div class="sub" id="kJitSub">variação consecutiva</div>
-  </div>
-  <div class="kpi">
-    <div class="k"><span>Perda de pacotes</span><span>janela</span></div>
-    <div class="v" id="kLoss">0,0<small>%</small></div>
-    <div class="sub" id="kLossSub">recebidos -- / -- pkts</div>
-  </div>
-  <div class="kpi">
-    <div class="k"><span>IP Público (Saída)</span><span id="kIpState">rmnet0</span></div>
-    <div class="v" id="kPubIp" style="font-size:16.5px">--</div>
-    <div class="sub" id="kIpSub">móvel: -- · 24h: 1 IP</div>
-  </div>
-</section>
-
-<section class="chart-panel" data-sec="latency" aria-label="Série temporal correlacionada">
-  <div class="chart-head">
-    <div class="chart-title">
-      <h2>Latência ICMP correlacionada com camada de rádio</h2>
-      <div class="readout-bar" id="crossReadout">
-        <span>Passe o cursor no gráfico para inspecionar um instante</span>
+  <!-- TOP BAR -->
+  <header class="topbar">
+    <div class="brand-group">
+      <div class="logo">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="10"></circle>
+          <line x1="2" y1="12" x2="22" y2="12"></line>
+          <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
+        </svg>
+        <span class="logo-text">grafenomonitor</span>
+      </div>
+      <div class="header-tag">Latência &amp; Geolocalização</div>
+      <div class="device-pill" id="devPill">
+        <span class="status-dot online" id="statusDot"></span>
+        <span class="device-name" id="devName">Samsung Galaxy S10</span>
+        <span class="device-sep">·</span>
+        <span class="device-net" id="devNet">4G LTE</span>
       </div>
     </div>
-    <div class="chart-tools">
-      <button class="chk" id="tTgt1" type="button" aria-pressed="true"><i class="sw" style="background:var(--cobalt)"></i><span id="lblTgt1">1.1.1.1</span></button>
-      <button class="chk" id="tTgt2" type="button" aria-pressed="true"><i class="sw" style="background:var(--violet)"></i><span id="lblTgt2">8.8.4.4</span></button>
-      <button class="chk" id="tRsrp" type="button" aria-pressed="true"><i class="sw" style="background:var(--amber)"></i>RSRP (dBm)</button>
-      <button class="chk" id="tSinr" type="button" aria-pressed="false"><i class="sw" style="background:var(--pine)"></i>SINR (dB)</button>
-    </div>
-  </div>
-  <div class="chart-body">
-    <div class="canvas-wrap">
-      <canvas id="tsCanvas" role="img" aria-label="Gráfico correlacionado de RTT ICMP, picos, perda de pacotes, RSRP, SINR e faixa de RAT ao longo do tempo"></canvas>
-    </div>
-    <aside class="dist-pane" aria-label="Distribuição e promoção RRC">
-      <h3>Distribuição (última janela)</h3>
-      <div class="pct-list" id="distBars"></div>
-      <div class="rrc-box">
-        <h3>Estabilidade &amp; Picos (RRC / fila)</h3>
-        <div class="row"><span>Base nominal (p50)</span><b id="stWarm">-- ms</b></div>
-        <div class="row"><span>Excesso nos picos (○)</span><b style="color:var(--crimson)" id="stCold">-- ms</b></div>
-        <div class="row"><span>Ocorrências</span><b id="stColdN">0 na janela</b></div>
-      </div>
-    </aside>
-  </div>
-</section>
 
-<main class="workgrid">
-  <div class="stack">
-    <section class="box" data-sec="latency" aria-label="Testes de latência por alvo">
-      <div class="box-head">
-        <h2>Alvos ativos de latência</h2>
-        <span>escala comparativa 0–150 ms (faixa p25–p95 · marcador p50)</span>
+    <div class="controls-group">
+      <div class="btn-group" role="group" aria-label="Janela de tempo">
+        <button type="button" class="btn-toggle active" data-win="900">15m</button>
+        <button type="button" class="btn-toggle" data-win="3600">1h</button>
+        <button type="button" class="btn-toggle" data-win="21600">6h</button>
+        <button type="button" class="btn-toggle" data-win="86400">24h</button>
       </div>
-      <div class="box-body tbl-wrap">
-        <table class="dt" id="tblTargets">
+
+      <button class="btn btn-outline" id="btnPause" type="button">
+        <span class="pause-icon">⏸</span>
+        <span id="btnPauseTxt">Pausar</span>
+      </button>
+
+      <button class="btn btn-icon" id="btnTheme" type="button" title="Alternar tema Claro / Escuro">
+        <span id="themeIcon">☀️</span>
+      </button>
+
+      <div class="live-indicator">
+        <span class="live-dot"></span>
+        <span id="liveStatus">Ao vivo</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- MAIN CONTAINER -->
+  <main class="dashboard-wrap">
+
+    <!-- KPI STRIP -->
+    <section class="kpi-grid">
+      <!-- KPI 1: LATÊNCIA ATUAL -->
+      <div class="kpi-card" id="cardLatency">
+        <div class="kpi-header">
+          <span class="kpi-title">Latência ICMP Atual</span>
+          <span class="badge badge-success" id="badgeLatency">Excelente</span>
+        </div>
+        <div class="kpi-hero">
+          <span class="hero-val" id="valRtt">--</span>
+          <span class="hero-unit">ms</span>
+        </div>
+        <div class="kpi-subline">
+          <span class="sub-item"><strong id="lblT1">1.1.1.1:</strong> <span id="valT1">-- ms</span></span>
+          <span class="sub-sep">|</span>
+          <span class="sub-item"><strong id="lblT2">8.8.4.4:</strong> <span id="valT2">-- ms</span></span>
+        </div>
+        <div class="kpi-foot">
+          <span>p50: <b id="valP50">-- ms</b></span>
+          <span>p95: <b id="valP95">-- ms</b></span>
+          <span>Jitter: <b id="valJitter">-- ms</b></span>
+        </div>
+      </div>
+
+      <!-- KPI 2: PERDA & ESTABILIDADE -->
+      <div class="kpi-card" id="cardLoss">
+        <div class="kpi-header">
+          <span class="kpi-title">Perda de Pacotes</span>
+          <span class="badge badge-success" id="badgeLoss">Estável</span>
+        </div>
+        <div class="kpi-hero">
+          <span class="hero-val" id="valLoss">0,0</span>
+          <span class="hero-unit">%</span>
+        </div>
+        <div class="kpi-subline" id="valLossSub">
+          <span>0 pacotes perdidos na janela</span>
+        </div>
+        <div class="kpi-foot">
+          <span>Recebidos: <b id="valPktsRec">--</b></span>
+          <span>Enviados: <b id="valPktsSent">--</b></span>
+        </div>
+      </div>
+
+      <!-- KPI 3: GEOLOCALIZAÇÃO -->
+      <div class="kpi-card" id="cardGps">
+        <div class="kpi-header">
+          <span class="kpi-title">Geolocalização (GPS)</span>
+          <span class="badge badge-info" id="badgeGps">Fix Ativo</span>
+        </div>
+        <div class="kpi-hero coords">
+          <span class="hero-coords" id="valCoords">--</span>
+        </div>
+        <div class="kpi-subline">
+          <span>Precisão: <strong id="valAccuracy">± -- m</strong></span>
+          <span class="sub-sep">·</span>
+          <span>Provedor: <strong id="valProvider">GPS</strong></span>
+        </div>
+        <div class="kpi-foot">
+          <span>Fix: <b id="valFixAge">-- atrás</b></span>
+          <span>Altitude: <b id="valAlt">-- m</b></span>
+        </div>
+      </div>
+
+      <!-- KPI 4: SINAL & ROTA -->
+      <div class="kpi-card" id="cardRadio">
+        <div class="kpi-header">
+          <span class="kpi-title">Sinal Móvel &amp; Saída</span>
+          <span class="badge badge-success" id="badgeSignal">Sinal Forte</span>
+        </div>
+        <div class="kpi-hero">
+          <span class="hero-val" id="valRsrp">--</span>
+          <span class="hero-unit">dBm</span>
+        </div>
+        <div class="kpi-subline">
+          <span id="valBand">LTE B3 (1800 MHz)</span>
+          <span class="sub-sep">·</span>
+          <span id="valCarrier">VIRTUEYES</span>
+        </div>
+        <div class="kpi-foot">
+          <span>IP Saída: <b id="valPublicIp">--</b></span>
+          <span>Bateria: <b id="valBattery">--%</b></span>
+        </div>
+      </div>
+    </section>
+
+    <!-- CORE 2-COLUMN SPLIT: MAP + LATENCY TIME SERIES -->
+    <section class="split-view">
+
+      <!-- COLUNA 1: MAPA DE GEOLOCALIZAÇÃO -->
+      <div class="panel map-panel">
+        <div class="panel-header">
+          <div class="panel-title-wrap">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6"></polygon>
+              <line x1="8" y1="2" x2="8" y2="18"></line>
+              <line x1="16" y1="6" x2="16" y2="22"></line>
+            </svg>
+            <h2>Geolocalização &amp; Trilha de Latência</h2>
+          </div>
+          <div class="map-actions">
+            <div class="legend-strip">
+              <span class="leg-item"><i class="leg-dot dot-low"></i> &lt; 65ms</span>
+              <span class="leg-item"><i class="leg-dot dot-med"></i> 65–110ms</span>
+              <span class="leg-item"><i class="leg-dot dot-high"></i> &gt; 110ms / Perda</span>
+            </div>
+            <button class="btn btn-sm btn-outline" id="btnFitMap" type="button" title="Ajustar visualização em todos os pontos">
+              Ajustar Rota
+            </button>
+            <button class="btn btn-sm btn-primary" id="btnRecenterMap" type="button" title="Centralizar na posição atual da sonda">
+              Centralizar Sonda
+            </button>
+          </div>
+        </div>
+
+        <div class="map-container-wrap">
+          <div id="telemetryMap" class="telemetry-map"></div>
+          <div class="map-overlay-info" id="mapOverlay">
+            <span id="mapPointCount">Carregando trilha GPS…</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- COLUNA 2: SÉRIE TEMPORAL DE LATÊNCIA -->
+      <div class="panel latency-panel">
+        <div class="panel-header">
+          <div class="panel-title-wrap">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
+            </svg>
+            <h2>Monitoramento Contínuo de Latência</h2>
+          </div>
+          <div class="target-selectors">
+            <label class="target-chip active" id="chipTgt1">
+              <input type="checkbox" id="chkTarget1" checked>
+              <i class="color-indicator color-cobalt"></i>
+              <span id="lblTarget1Name">1.1.1.1</span>
+            </label>
+            <label class="target-chip active" id="chipTgt2">
+              <input type="checkbox" id="chkTarget2" checked>
+              <i class="color-indicator color-violet"></i>
+              <span id="lblTarget2Name">8.8.4.4</span>
+            </label>
+          </div>
+        </div>
+
+        <div class="chart-readout-bar" id="chartReadout">
+          <span>Passe o cursor sobre o gráfico para ver o instante exato</span>
+        </div>
+
+        <div class="chart-canvas-container">
+          <canvas id="latencyCanvas"></canvas>
+        </div>
+
+        <!-- LATENCY DISTRIBUTION STATS -->
+        <div class="latency-dist-strip">
+          <div class="dist-stat-col">
+            <span class="dist-lbl">Mínima</span>
+            <span class="dist-num" id="statMin">-- ms</span>
+          </div>
+          <div class="dist-stat-col">
+            <span class="dist-lbl">Mediana (p50)</span>
+            <span class="dist-num color-success" id="statP50">-- ms</span>
+          </div>
+          <div class="dist-stat-col">
+            <span class="dist-lbl">Percentil 95 (p95)</span>
+            <span class="dist-num color-warning" id="statP95">-- ms</span>
+          </div>
+          <div class="dist-stat-col">
+            <span class="dist-lbl">Máxima</span>
+            <span class="dist-num color-danger" id="statMax">-- ms</span>
+          </div>
+          <div class="dist-stat-col">
+            <span class="dist-lbl">Jitter Médio</span>
+            <span class="dist-num" id="statJitter">-- ms</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- BOTTOM PANEL: HISTÓRICO GEORREFERENCIADO -->
+    <section class="panel history-panel">
+      <div class="panel-header">
+        <div class="panel-title-wrap">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"></circle>
+            <polyline points="12 6 12 12 16 14"></polyline>
+          </svg>
+          <h2>Histórico de Amostras Georreferenciadas</h2>
+        </div>
+        <div class="history-actions">
+          <span class="table-info-tag" id="tableCountTag">Exibindo últimos pontos</span>
+          <button class="btn btn-sm btn-outline" id="btnExportCsv" type="button">
+            Exportar CSV
+          </button>
+        </div>
+      </div>
+
+      <div class="table-container">
+        <table class="simple-table" id="tableHistory">
           <thead>
             <tr>
-              <th>Teste / Alvo</th>
-              <th class="num c-hide">Interv.</th>
-              <th class="num">Última</th>
-              <th class="num">p50</th>
-              <th class="num c-hide">p95</th>
-              <th class="c-hide">Faixa</th>
-              <th class="num c-hide">Jitter</th>
-              <th class="num">Perda</th>
-              <th>Estado</th>
+              <th>Horário</th>
+              <th>Posição (Lat, Lon)</th>
+              <th class="text-right">Precisão</th>
+              <th class="text-right">RTT 1.1.1.1</th>
+              <th class="text-right">RTT 8.8.4.4</th>
+              <th class="text-right">Perda</th>
+              <th>Sinal Móvel</th>
+              <th>Tecnologia</th>
+              <th class="text-center">Ação</th>
             </tr>
           </thead>
-          <tbody></tbody>
+          <tbody id="tableHistoryBody">
+            <tr>
+              <td colspan="9" class="table-empty">Aguardando dados da sonda...</td>
+            </tr>
+          </tbody>
         </table>
       </div>
     </section>
 
-    <section class="box" data-sec="radio" aria-label="Célula servidora e histórico de células">
-      <div class="box-head">
-        <h2>Célula servidora e setores observados</h2>
-        <span id="rfSource">dumpsys telephony.registry · 5 s</span>
-      </div>
-      <div class="box-body rf-split">
-        <dl class="kv" id="dlCell"></dl>
-        <div class="tbl-wrap">
-          <table class="dt" id="tblNb">
-            <thead>
-              <tr>
-                <th>PCI</th>
-                <th class="num">EARFCN</th>
-                <th>Banda</th>
-                <th class="num">RSRP méd</th>
-                <th>Status</th>
-              </tr>
-            </thead>
-            <tbody></tbody>
-          </table>
-        </div>
-      </div>
-    </section>
+  </main>
 
-    <section class="box" data-sec="radio" aria-label="Georreferenciamento e raio Timing Advance">
-      <div class="box-head">
-        <h2>Georreferenciamento &amp; Cobertura da Célula (TA)</h2>
-        <span id="gpsHeaderSub">dumpsys location + termux-location (30 s)</span>
-      </div>
-      <div class="box-body gps-wrap">
-        <div id="inlineMap" class="inline-map" role="region" aria-label="Mapa com posição e raio de Timing Advance"></div>
-        <div class="gps-stats">
-          <div><span>Latitude</span><b id="gpsLat">--</b></div>
-          <div><span>Longitude</span><b id="gpsLon">--</b></div>
-          <div><span>Provedor</span><b id="gpsProv">--</b></div>
-          <div><span>Precisão</span><b id="gpsAcc">--</b></div>
-          <div><span>Raio TA</span><b id="gpsTa">--</b></div>
-          <div><span>Idade fix</span><b id="gpsAge">--</b></div>
-        </div>
-      </div>
-    </section>
-  </div>
+  <footer class="app-footer">
+    <div class="footer-left">
+      <span>grafenomonitor · Versão Simplificada (Latência &amp; Geolocalização)</span>
+      <span class="footer-sep">·</span>
+      <span id="footerProbeDetails">Sonda S10 · Ingestão 1 Hz ICMP</span>
+    </div>
+    <div class="footer-right">
+      <span>Branch: <code>feature/simplified-ui</code></span>
+    </div>
+  </footer>
 
-  <div class="stack">
-    <section class="box" data-sec="latency radio" aria-label="Eventos de rádio e rede">
-      <div class="box-head">
-        <h2>Eventos correlacionados</h2>
-        <span>troca IP público/local · handover · CA · perda</span>
-      </div>
-      <div class="box-body">
-        <ul class="ev-list" id="evList"></ul>
-      </div>
-    </section>
-
-    <section class="box" data-sec="collectors" aria-label="Coletores root configuráveis">
-      <div class="box-head">
-        <h2>Coletores root (sonda em execução)</h2>
-        <span>clique "ver bruto" para inspecionar saída real</span>
-      </div>
-      <div class="box-body">
-        <div class="tbl-wrap">
-          <table class="dt" id="tblColl">
-            <thead>
-              <tr>
-                <th>ID do coletor</th>
-                <th>Modo</th>
-                <th class="num">Interv.</th>
-                <th>Estado / Amostras</th>
-                <th>Bruto</th>
-              </tr>
-            </thead>
-            <tbody></tbody>
-          </table>
-        </div>
-        <pre class="raw-box" id="rawBox"></pre>
-      </div>
-    </section>
-
-    <section class="box" data-sec="collectors" aria-label="Telemetria do aparelho e rota">
-      <div class="box-head">
-        <h2>Sonda, hardware e saída de tráfego</h2>
-        <span id="probeUptime">sessão ativa</span>
-      </div>
-      <div class="box-body">
-        <dl class="kv" id="dlProbe"></dl>
-      </div>
-    </section>
-  </div>
-</main>
-
-<section class="box full-box" data-sec="latency radio" aria-label="Resumo consolidado minuto a minuto">
-  <div class="box-head">
-    <h2>Histórico consolidado minuto a minuto</h2>
-    <span>1 linha por minuto · cruzamento de ambos os alvos ICMP com as 12 leituras de rádio (5 s) e rota de saída</span>
-  </div>
-  <div class="box-body tbl-wrap">
-    <table class="dt" id="tblMinutes">
-      <thead>
-        <tr>
-          <th>Minuto</th>
-          <th>Estado</th>
-          <th class="num" id="thMinT1">1.1.1.1 (méd / mín–máx)</th>
-          <th class="num c-hide">Jitter 1</th>
-          <th class="num" id="thMinT2">8.8.4.4 (méd / mín–máx)</th>
-          <th class="num c-hide">Jitter 2</th>
-          <th class="num">Perda (rec/env)</th>
-          <th class="num">RSRP (méd / mín)</th>
-          <th class="num c-hide">RSRQ / SINR</th>
-          <th>RAT · Banda · PCI</th>
-          <th class="num c-hide">Dist. TA</th>
-          <th>IP Público (Saída)</th>
-          <th class="c-hide">IP rmnet0</th>
-        </tr>
-      </thead>
-      <tbody></tbody>
-    </table>
-  </div>
-</section>
-
-<footer>
-  <span id="footerLeft">grafenomonitor · bancada técnica em produção (Samsung Galaxy S10 SM-G973F / Shannon LTE)</span>
-  <span id="footerRight">Ingestão HTTP :8000/api/v3/ingest · ICMP 1 Hz contínuo · RF 5 s · GPS 30 s</span>
-</footer>
-
-<script src="/static/app.js?v=3.2.0"></script>
+  <script src="/static/app.js?v=4.0.0"></script>
 </body>
 </html>
