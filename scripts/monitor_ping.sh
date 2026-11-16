@@ -10,15 +10,16 @@ export PREFIX="/data/data/com.termux/files/usr"
 export PATH="$PREFIX/bin:$HOME/bin:/system/bin:/system/xbin:$PATH"
 export LD_LIBRARY_PATH="$PREFIX/lib:$LD_LIBRARY_PATH"
 
-[ -z "$HOME" ] || [ "$HOME" = "/" ] && HOME="/data/data/com.termux/files/home"
+HOME="/data/data/com.termux/files/home"
+DIR_LOCAL="/data/data/com.termux/files/home/monitor"
 
-SERVER_URL="http://localhost:8000/api/telemetry"
+SERVER_URL="http://3.21.105.65:8000/api/telemetry"
 DEVICE_ID="samsung_s10_beyond1"
 
-# Alvos de Monitoramento ICMP Contínuo
+# Alvos de Monitoramento ICMP Contínuo (Cloudflare DNS e Google DNS secundário)
 TARGETS=(
-    "8.8.8.8"
-    "172.31.128.53"
+    "1.1.1.1"
+    "8.8.4.4"
 )
 
 # Amostras por ciclo (50 pings a 1 por segundo = ~50s de tráfego contínuo por minuto)
@@ -68,11 +69,17 @@ while true; do
 
     # 2. Executa Pings Contínuos em Paralelo (1 Hz durante ~50 segundos)
     echo "Disparando ICMP contínuo (50 segundos de fluxo nos 2 alvos)..."
-    su -c "ping -c $PING_COUNT -i 1 -W 1 -I rmnet0 ${TARGETS[0]} > '$TMP_P1' 2>&1" &
-    PID1=$!
-
-    su -c "ping -c $PING_COUNT -i 1 -W 1 -I rmnet0 ${TARGETS[1]} > '$TMP_P2' 2>&1" &
-    PID2=$!
+    if [ "$(id -u)" -eq 0 ]; then
+        ping -c $PING_COUNT -i 1 -W 1 -I rmnet0 ${TARGETS[0]} > "$TMP_P1" 2>&1 &
+        PID1=$!
+        ping -c $PING_COUNT -i 1 -W 1 -I rmnet0 ${TARGETS[1]} > "$TMP_P2" 2>&1 &
+        PID2=$!
+    else
+        su -c "ping -c $PING_COUNT -i 1 -W 1 -I rmnet0 ${TARGETS[0]} > '$TMP_P1' 2>&1" &
+        PID1=$!
+        su -c "ping -c $PING_COUNT -i 1 -W 1 -I rmnet0 ${TARGETS[1]} > '$TMP_P2' 2>&1" &
+        PID2=$!
+    fi
 
     # Aguarda término dos pings em paralelo
     wait $PID1 $PID2
