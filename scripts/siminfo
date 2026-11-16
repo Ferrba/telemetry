@@ -1,0 +1,455 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# ==============================================================================
+# siminfo v2 - Diagnóstico Completo de SIM Card, Rede, IP & Dispositivo
+# ==============================================================================
+
+# Garante PATH completo para qualquer ambiente (Terminal, SSH ou Termux Widget)
+export PATH="/data/data/com.termux/files/usr/bin:/data/data/com.termux/files/home/bin:/system/bin:/system/xbin:$PATH"
+
+BOLD="\033[1m"
+GREEN="\033[32m"
+BLUE="\033[34m"
+CYAN="\033[36m"
+YELLOW="\033[33m"
+RED="\033[31m"
+GRAY="\033[90m"
+NC="\033[0m"
+
+load_android_env() {
+    if [ -z "$BOOTCLASSPATH" ]; then
+        eval $(su -c 'tr "\0" "\n" < /proc/$(pidof system_server)/environ 2>/dev/null | grep -E "^(BOOTCLASSPATH|ANDROID_ROOT|ANDROID_DATA|ANDROID_ART_ROOT|ANDROID_I18N_ROOT|ANDROID_TZDATA_ROOT)=" | sed "s/^/export /"')
+    fi
+}
+
+earfcn_to_band() {
+    local ch=$1
+    if [ -z "$ch" ] || [ "$ch" = "-1" ] || [ "$ch" = "2147483647" ]; then
+        echo "N/D"
+        return
+    fi
+    if [ "$ch" -ge 0 ] && [ "$ch" -le 599 ]; then echo "B1 (2100 MHz)"
+    elif [ "$ch" -ge 1200 ] && [ "$ch" -le 1949 ]; then echo "B3 (1800 MHz)"
+    elif [ "$ch" -ge 2400 ] && [ "$ch" -le 2649 ]; then echo "B5 (850 MHz)"
+    elif [ "$ch" -ge 2750 ] && [ "$ch" -le 3449 ]; then echo "B7 (2600 MHz)"
+    elif [ "$ch" -ge 3450 ] && [ "$ch" -le 3799 ]; then echo "B8 (900 MHz)"
+    elif [ "$ch" -ge 6150 ] && [ "$ch" -le 6449 ]; then echo "B20 (800 MHz)"
+    elif [ "$ch" -ge 9210 ] && [ "$ch" -le 9659 ]; then echo "B28 (700 MHz APT)"
+    elif [ "$ch" -ge 38650 ] && [ "$ch" -le 39649 ]; then echo "B40 (2300 MHz)"
+    else echo "Canal $ch"; fi
+}
+
+eval_rsrp() {
+    local rsrp=$1
+    if [ -z "$rsrp" ] || [ "$rsrp" = "-1" ] || [ "$rsrp" = "2147483647" ]; then
+        echo "Sem Sinal"
+        return
+    fi
+    if [ "$rsrp" -ge -80 ]; then echo -e "${GREEN}Excelente${NC}"
+    elif [ "$rsrp" -ge -95 ]; then echo -e "${GREEN}Muito Bom${NC}"
+    elif [ "$rsrp" -ge -105 ]; then echo -e "${YELLOW}Bom / Médio${NC}"
+    elif [ "$rsrp" -ge -115 ]; then echo -e "${YELLOW}Fraco${NC}"
+    else echo -e "${RED}Crítico / Sem Cobertura${NC}"; fi
+}
+
+bars_visual() {
+    local lvl=$1
+    case "$lvl" in
+        4) echo -e "${GREEN}[||||] (4/4)${NC}" ;;
+        3) echo -e "${GREEN}[|||.] (3/4)${NC}" ;;
+        2) echo -e "${YELLOW}[||..] (2/4)${NC}" ;;
+        1) echo -e "${RED}[|...] (1/4)${NC}" ;;
+        0) echo -e "${RED}[....] (0/4)${NC}" ;;
+        *) echo "[----]" ;;
+    esac
+}
+
+collect_data() {
+    load_android_env
+
+    # 1. Informações do Dispositivo
+    DEV_MODEL=$(su -c 'getprop ro.product.model')
+    [ -z "$DEV_MODEL" ] && DEV_MODEL=$(getprop ro.product.model)
+
+    DEV_BRAND=$(su -c 'getprop ro.product.brand')
+    [ -z "$DEV_BRAND" ] && DEV_BRAND=$(getprop ro.product.brand)
+
+    DEV_CODENAME=$(su -c 'getprop ro.product.device')
+    [ -z "$DEV_CODENAME" ] && DEV_CODENAME=$(getprop ro.product.device)
+
+    DEV_ANDROID=$(su -c 'getprop ro.build.version.release')
+    [ -z "$DEV_ANDROID" ] && DEV_ANDROID=$(getprop ro.build.version.release)
+
+    DEV_SDK=$(su -c 'getprop ro.build.version.sdk')
+    [ -z "$DEV_SDK" ] && DEV_SDK=$(getprop ro.build.version.sdk)
+
+    DEV_SERIAL=$(su -c 'getprop ro.serialno')
+    [ -z "$DEV_SERIAL" ] && DEV_SERIAL=$(getprop ro.serialno)
+
+    # 2. Dados do SIM Card ativo via Content Provider
+    RAW_SIM=$(su -c 'content query --uri content://telephony/siminfo --projection sim_id:display_name:carrier_name:icc_id:imsi:mcc:mnc:number --where "sim_id>=0"')
+
+    # 3. Dados de Rádio e Rede via dumpsys
+    REG=$(su -c 'dumpsys telephony.registry' 2>/dev/null)
+
+    SERV=$(echo "$REG" | grep "mServiceState=" | head -n 1)
+    OP_HOST=$(echo "$SERV" | sed -n 's/.*mAlphaLong=\([^ ]*\).*/\1/p' | head -n 1)
+    [ -z "$OP_HOST" ] && OP_HOST=$(echo "$SERV" | sed -n 's/.*mOperatorAlphaLong=\([^, ]*\).*/\1/p' | head -n 1)
+    
+    RAT=$(echo "$SERV" | sed -n 's/.*MobileDataRat=\([^, ]*\).*/\1/p' | head -n 1)
+    [ -z "$RAT" -o "$RAT" = "Unknown" ] && RAT=$(echo "$SERV" | sed -n 's/.*accessNetworkTechnology=\([^ ]*\).*/\1/p' | head -n 1)
+    
+    ROAM_TYPE=$(echo "$SERV" | sed -n 's/.*MobileDataRoamingType=\([^, ]*\).*/\1/p' | head -n 1)
+    EARFCN=$(echo "$SERV" | sed -n 's/.*mEarfcn=\([^ ]*\).*/\1/p' | head -n 1)
+    PCI=$(echo "$SERV" | sed -n 's/.*mPci=\([^ ]*\).*/\1/p' | head -n 1)
+    TAC=$(echo "$SERV" | sed -n 's/.*mTac=\([^ ]*\).*/\1/p' | head -n 1)
+
+    SIG=$(echo "$REG" | grep "mSignalStrength=" | head -n 1)
+    RSRP=$(echo "$SIG" | sed -n 's/.*rsrp=\([^ ]*\).*/\1/p')
+    RSRQ=$(echo "$SIG" | sed -n 's/.*rsrq=\([^ ]*\).*/\1/p')
+    RSSNR=$(echo "$SIG" | sed -n 's/.*rssnr=\([^ ]*\).*/\1/p')
+    LEVEL=$(echo "$SIG" | sed -n 's/.*level=\([^ ]*\).*/\1/p')
+
+    # 4. Dados Detalhados de Rede e IP via dumpsys connectivity
+    CONN_DUMP=$(su -c 'dumpsys connectivity' 2>/dev/null)
+    CONN_MOBILE=$(echo "$CONN_DUMP" | grep "InterfaceName: rmnet0" | head -n 1)
+    [ -z "$CONN_MOBILE" ] && CONN_MOBILE=$(echo "$CONN_DUMP" | grep -E "InterfaceName: (rmnet|ccmni)" | head -n 1)
+
+    # IP Móvel (Local)
+    IP_MOBI=$(echo "$CONN_MOBILE" | sed -n 's/.*LinkAddresses: \[ \([0-9./]*\) \].*/\1/p')
+    if [ -z "$IP_MOBI" ]; then
+        IP_MOBI=$(su -c 'ip -4 addr show rmnet0 2>/dev/null' | grep -o 'inet [0-9./]*' | awk '{print $2}')
+    fi
+    [ -z "$IP_MOBI" ] && IP_MOBI="Desconectado"
+
+    # Gateway
+    GATEWAY=$(echo "$CONN_MOBILE" | sed -n 's/.*0\.0\.0\.0\/0 -> \([0-9.]*\).*/\1/p')
+    if [ -z "$GATEWAY" ]; then
+        GATEWAY=$(su -c 'ip route show dev rmnet0' 2>/dev/null | grep "default via" | awk '{print $3}' | head -n 1)
+    fi
+
+    # DNS
+    DNS_SERVERS=$(echo "$CONN_MOBILE" | sed -n 's/.*DnsAddresses: \[ \([^]]*\) \].*/\1/p' | tr -d '/' | tr ',' ' ')
+    if [ -z "$DNS_SERVERS" ]; then
+        DNS_SERVERS=$(echo "$CONN_MOBILE" | sed -n 's/.*ValidatedPrivateDnsAddresses: \[\([^]]*\)\].*/\1/p' | tr ',' ' ')
+    fi
+
+    # APN
+    APN=$(echo "$CONN_DUMP" | grep -E "extra: [^ }]+" | grep "rmnet0" | sed -n 's/.*extra: \([^ }]*\).*/\1/p' | head -n 1)
+
+    # Consulta de IP Público (Tripla redundância: AWS, icanhazip e ident.me)
+    PUB_IP=$(su -c '/data/data/com.termux/files/usr/bin/curl -s --interface rmnet0 --max-time 3 http://checkip.amazonaws.com 2>/dev/null' | tr -d ' \r\n')
+    if [ -z "$PUB_IP" ]; then
+        PUB_IP=$(su -c '/data/data/com.termux/files/usr/bin/curl -s --interface rmnet0 --max-time 3 http://icanhazip.com 2>/dev/null' | tr -d ' \r\n')
+    fi
+    if [ -z "$PUB_IP" ]; then
+        PUB_IP=$(su -c '/data/data/com.termux/files/usr/bin/curl -s --interface rmnet0 --max-time 3 http://ident.me 2>/dev/null' | tr -d ' \r\n')
+    fi
+    [ -z "$PUB_IP" ] && PUB_IP="N/A (Sem conexao externa)"
+}
+
+render_summary() {
+    echo -e "${BLUE}============================================================${NC}"
+    echo -e "${BOLD}${CYAN}            DIAGNOSTICO DE SIM CARD & REDE MOVEL             ${NC}"
+    echo -e "${BLUE}============================================================${NC}"
+
+    echo -e "${BOLD}[ DISPOSITIVO ]${NC}"
+    printf "  %-22s : %s %s (%s)\n" "Modelo" "$DEV_BRAND" "$DEV_MODEL" "$DEV_CODENAME"
+    printf "  %-22s : Android %s (API %s)\n" "Sistema" "$DEV_ANDROID" "$DEV_SDK"
+    printf "  %-22s : %s\n" "Serial (ADB)" "${DEV_SERIAL:-N/A}"
+
+    echo -e "\n${BOLD}[ IDENTIFICACAO DO SIM CARD ]${NC}"
+    if [ -z "$RAW_SIM" ]; then
+        echo -e "  ${RED}[!] Nenhum SIM Card ativo detectado no slot.${NC}"
+    else
+        echo "$RAW_SIM" | while IFS= read -r line; do
+            SLOT=$(echo "$line" | sed -n 's/.*sim_id=\([^, ]*\).*/\1/p')
+            NAME=$(echo "$line" | sed -n 's/.*display_name=\([^, ]*\).*/\1/p')
+            ICCID=$(echo "$line" | sed -n 's/.*icc_id=\([^, ]*\).*/\1/p')
+            IMSI=$(echo "$line" | sed -n 's/.*imsi=\([^, ]*\).*/\1/p')
+            MCC=$(echo "$line" | sed -n 's/.*mcc=\([^, ]*\).*/\1/p')
+            MNC=$(echo "$line" | sed -n 's/.*mnc=\([^, ]*\).*/\1/p')
+            NUM=$(echo "$line" | sed -n 's/.*number=\([^, ]*\).*/\1/p')
+
+            printf "  %-22s : Slot %s\n" "Slot" "$SLOT"
+            printf "  %-22s : %s\n" "Operadora (MVNO)" "$NAME"
+            printf "  %-22s : %s\n" "ICCID" "$ICCID"
+            printf "  %-22s : %s\n" "IMSI" "$IMSI"
+            printf "  %-22s : %s / %s\n" "PLMN (MCC/MNC)" "$MCC" "$MNC"
+            printf "  %-22s : %s\n" "Numero" "${NUM:-N/A}"
+        done
+    fi
+
+    echo -e "\n${BOLD}[ CONEXAO CELULAR & APN ]${NC}"
+    printf "  %-22s : %s\n" "Tecnologia" "${RAT:-Desconhecido}"
+    printf "  %-22s : %s\n" "Antena Registrada" "${OP_HOST:-N/A}"
+    printf "  %-22s : %s\n" "Modo Roaming" "${ROAM_TYPE:-N/A}"
+    printf "  %-22s : %s\n" "Ponto de Acesso (APN)" "${APN:-N/A}"
+
+    echo -e "\n${BOLD}[ CONFIGURACAO IP & ROTEAMENTO ]${NC}"
+    printf "  %-22s : %s\n" "IP Movel (Local/CGNAT)" "$IP_MOBI"
+    printf "  %-22s : %s\n" "Gateway da Operadora" "${GATEWAY:-N/A}"
+    printf "  %-22s : %s\n" "IP Publico (Internet)" "$PUB_IP"
+    printf "  %-22s : %s\n" "Servidores DNS" "${DNS_SERVERS:-N/A}"
+
+    echo -e "\n${BOLD}[ METRICAS DE SINAL (RF) ]${NC}"
+    printf "  %-22s : %s\n" "Nivel de Sinal" "$(bars_visual "$LEVEL")"
+    if [ ! -z "$RSRP" ] && [ "$RSRP" != "-1" ]; then
+        printf "  %-22s : %s dBm (%s)\n" "Potencia (RSRP)" "$RSRP" "$(eval_rsrp "$RSRP")"
+        printf "  %-22s : %s dB\n" "Qualidade (RSRQ)" "$RSRQ"
+        printf "  %-22s : %s dB\n" "Ruido (RSSNR)" "$RSSNR"
+        printf "  %-22s : %s\n" "Banda / Frequencia" "$(earfcn_to_band "$EARFCN")"
+    else
+        echo -e "  ${GRAY}Sem metricas detalhadas de sinal no momento.${NC}"
+    fi
+    echo -e "${BLUE}============================================================${NC}"
+}
+
+show_summary() {
+    collect_data
+    clear
+    local output_text=$(render_summary)
+    echo -e "$output_text"
+
+    # Salva automaticamente o log limpo em /sdcard/logs/
+    local log_dir="/sdcard/logs"
+    su -c "mkdir -p $log_dir && chmod 777 $log_dir" 2>/dev/null
+    local ts=$(date '+%Y%m%d_%H%M%S')
+    local log_file="${log_dir}/siminfo_${ts}.txt"
+    echo -e "$output_text" | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' > "$log_file" 2>/dev/null
+    chmod 666 "$log_file" 2>/dev/null
+
+    printf "\n${GRAY}Log salvo em: %s${NC}\n" "$log_file"
+}
+
+show_signal() {
+    collect_data
+    clear
+    echo -e "${BLUE}============================================================${NC}"
+    echo -e "${BOLD}${GREEN}               METRICAS DETALHADAS DE SINAL (RF)             ${NC}"
+    echo -e "${BLUE}============================================================${NC}"
+    printf "  %-22s : %s\n" "Tecnologia Ativa" "$RAT"
+    printf "  %-22s : %s\n" "Operadora da Torre" "$OP_HOST"
+    printf "  %-22s : %s\n" "Nivel de Barras" "$(bars_visual "$LEVEL")"
+    printf "  %-22s : %s dBm [%s]\n" "RSRP (Potencia)" "${RSRP:-N/D}" "$(eval_rsrp "$RSRP")"
+    printf "  %-22s : %s dB\n" "RSRQ (Qualidade)" "${RSRQ:-N/D}"
+    printf "  %-22s : %s dB\n" "RSSNR (Relacao S/N)" "${RSSNR:-N/D}"
+    printf "  %-22s : %s\n" "Canal EARFCN" "${EARFCN:-N/D}"
+    printf "  %-22s : %s\n" "Banda LTE Estimada" "$(earfcn_to_band "$EARFCN")"
+    printf "  %-22s : %s\n" "Physical Cell ID (PCI)" "${PCI:-N/D}"
+    printf "  %-22s : %s\n" "Tracking Area (TAC)" "${TAC:-N/D}"
+    echo -e "${BLUE}============================================================${NC}"
+}
+
+show_history() {
+    local limit=${1:-10}
+    echo -e "${BLUE}============================================================${NC}"
+    echo -e "${BOLD}${YELLOW}       HISTORICO DE CHIPS REGISTRADOS NO APARELHO (Ultimos $limit)   ${NC}"
+    echo -e "${BLUE}============================================================${NC}"
+
+    local db="/data/user_de/0/com.android.providers.telephony/databases/telephony.db"
+    local sql="SELECT _id, sim_id, display_name, icc_id, imsi FROM siminfo ORDER BY _id DESC LIMIT $limit;"
+    
+    local res=$(su -c "/data/data/com.termux/files/usr/bin/sqlite3 \"$db\" \"$sql\"" 2>/dev/null)
+    
+    if [ -z "$res" ]; then
+        echo "Nenhum historico encontrado no banco de telefonia."
+    else
+        printf "${BOLD}%-4s %-6s %-16s %-22s %-16s${NC}\n" "ID" "SLOT" "OPERADORA" "ICCID" "IMSI"
+        echo "------------------------------------------------------------"
+        echo "$res" | while IFS='|' read -r id slot name iccid imsi; do
+            local slot_str="$slot"
+            if [ "$slot" = "0" ] || [ "$slot" = "1" ]; then
+                slot_str="${GREEN}ATIVO ($slot)${NC}"
+            else
+                slot_str="${GRAY}ANTIGO${NC}"
+            fi
+            printf "%-4s %-16b %-16s %-22s %-16s\n" "$id" "$slot_str" "${name:0:15}" "$iccid" "$imsi"
+        done
+    fi
+    echo -e "${BLUE}============================================================${NC}"
+}
+
+show_json() {
+    collect_data
+    
+    SLOT=""
+    NAME=""
+    ICCID=""
+    IMSI=""
+    MCC=""
+    MNC=""
+    NUM=""
+    if [ ! -z "$RAW_SIM" ]; then
+        SLOT=$(echo "$RAW_SIM" | head -n 1 | sed -n 's/.*sim_id=\([^, ]*\).*/\1/p')
+        NAME=$(echo "$RAW_SIM" | head -n 1 | sed -n 's/.*display_name=\([^, ]*\).*/\1/p')
+        ICCID=$(echo "$RAW_SIM" | head -n 1 | sed -n 's/.*icc_id=\([^, ]*\).*/\1/p')
+        IMSI=$(echo "$RAW_SIM" | head -n 1 | sed -n 's/.*imsi=\([^, ]*\).*/\1/p')
+        MCC=$(echo "$RAW_SIM" | head -n 1 | sed -n 's/.*mcc=\([^, ]*\).*/\1/p')
+        MNC=$(echo "$RAW_SIM" | head -n 1 | sed -n 's/.*mnc=\([^, ]*\).*/\1/p')
+        NUM=$(echo "$RAW_SIM" | head -n 1 | sed -n 's/.*number=\([^, ]*\).*/\1/p')
+    fi
+
+    cat << EOF
+{
+  "device": {
+    "brand": "${DEV_BRAND:-null}",
+    "model": "${DEV_MODEL:-null}",
+    "codename": "${DEV_CODENAME:-null}",
+    "android": "${DEV_ANDROID:-null}",
+    "sdk": ${DEV_SDK:-0},
+    "serial": "${DEV_SERIAL:-null}"
+  },
+  "sim": {
+    "slot": "${SLOT:-null}",
+    "carrier_name": "${NAME:-null}",
+    "iccid": "${ICCID:-null}",
+    "imsi": "${IMSI:-null}",
+    "mcc": "${MCC:-null}",
+    "mnc": "${MNC:-null}",
+    "number": "${NUM:-null}"
+  },
+  "network": {
+    "technology": "${RAT:-null}",
+    "host_carrier": "${OP_HOST:-null}",
+    "roaming": "${ROAM_TYPE:-null}",
+    "apn": "${APN:-null}",
+    "mobile_ip": "${IP_MOBI:-null}",
+    "gateway": "${GATEWAY:-null}",
+    "public_ip": "${PUB_IP:-null}",
+    "dns": "${DNS_SERVERS:-null}"
+  },
+  "radio": {
+    "signal_level": ${LEVEL:-0},
+    "rsrp_dbm": ${RSRP:-null},
+    "rsrq_db": ${RSRQ:-null},
+    "rssnr_db": ${RSSNR:-null},
+    "earfcn": ${EARFCN:-null},
+    "pci": "${PCI:-null}",
+    "tac": "${TAC:-null}"
+  }
+}
+EOF
+}
+
+show_debug() {
+    load_android_env
+    echo -e "${BLUE}=== DEVICE PROPERTIES ===${NC}"
+    echo "Model:   $(getprop ro.product.model)"
+    echo "Brand:   $(getprop ro.product.brand)"
+    echo "Device:  $(getprop ro.product.device)"
+    echo "Release: $(getprop ro.build.version.release)"
+    echo "SDK:     $(getprop ro.build.version.sdk)"
+    echo ""
+    echo -e "${BLUE}=== TELEPHONY DUMPSYS SUMMARY ===${NC}"
+    su -c 'dumpsys isub 2>/dev/null' | head -n 25
+    echo ""
+    echo -e "${BLUE}=== SERVICE STATE ===${NC}"
+    su -c 'dumpsys telephony.registry 2>/dev/null' | grep -E "mServiceState|mSignalStrength|mDataConnectionState" | head -n 15
+    echo ""
+    echo -e "${BLUE}=== NETWORK INTERFACES ===${NC}"
+    su -c 'ip -4 addr show 2>/dev/null' | grep -E "rmnet|wlan" -A 2
+}
+
+show_help() {
+    echo -e "${BOLD}Uso:${NC} siminfo [OPCOES]"
+    echo ""
+    echo -e "${BOLD}Opcoes disponiveis:${NC}"
+    echo "  (sem opcoes)        Exibe o painel completo (Dispositivo + SIM + Sinal + Rede + IPs + DNS)"
+    echo "  -s, --signal        Foca nas metricas detalhadas de radio/antena (RF)"
+    echo "  -w, --watch [SEG]   Monitoramento continuo em tempo real (padrao: 3s)"
+    echo "  -j, --json          Retorna os dados estruturados em formato JSON"
+    echo "  -H, --history [N]   Exibe historico dos ultimos N chips testados (padrao: 10)"
+    echo "  -d, --debug         Diagnostico rapido dos servicos internos de telefonia"
+    echo "  -p, --pause         Aguarda 'ENTER' para fechar (ideal para Termux Widget)"
+    echo "  -h, --help          Exibe esta tela de ajuda"
+    echo ""
+    echo -e "${BOLD}Exemplos:${NC}"
+    echo "  siminfo              # Visualizar dados na tela"
+    echo "  siminfo -w 2         # Atualizar metricas de sinal a cada 2 segundos"
+    echo "  siminfo -H 15        # Ver os ultimos 15 chips testados no aparelho"
+    echo "  siminfo -j | jq      # Processar dados em formato JSON"
+}
+
+MODE="summary"
+WATCH_SEC=3
+HIST_LIMIT=10
+PAUSE=false
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -s|--signal)
+            MODE="signal"
+            shift
+            ;;
+        -w|--watch)
+            MODE="watch"
+            if [ -n "$2" ] && [ "$2" -eq "$2" 2>/dev/null ]; then
+                WATCH_SEC=$2
+                shift 2
+            else
+                shift
+            fi
+            ;;
+        -j|--json)
+            MODE="json"
+            shift
+            ;;
+        -H|--history)
+            MODE="history"
+            if [ -n "$2" ] && [ "$2" -eq "$2" 2>/dev/null ]; then
+                HIST_LIMIT=$2
+                shift 2
+            else
+                shift
+            fi
+            ;;
+        -d|--debug)
+            MODE="debug"
+            shift
+            ;;
+        -p|--pause)
+            PAUSE=true
+            shift
+            ;;
+        -h|--help)
+            show_help
+            exit 0
+            ;;
+        *)
+            echo "Opcao invalida: $1"
+            echo "Execute 'siminfo --help' para ver os comandos."
+            exit 1
+            ;;
+    esac
+done
+
+case "$MODE" in
+    summary)
+        show_summary
+        ;;
+    signal)
+        show_signal
+        ;;
+    watch)
+        trap "echo -e '\nMonitoramento finalizado.'; exit 0" SIGINT SIGTERM
+        while true; do
+            show_summary
+            echo -e "\n${GRAY}[Atualizando a cada ${WATCH_SEC}s - Pressione Ctrl+C para sair]${NC}"
+            sleep "$WATCH_SEC"
+        done
+        ;;
+    history)
+        show_history "$HIST_LIMIT"
+        ;;
+    json)
+        show_json
+        ;;
+    debug)
+        show_debug
+        ;;
+esac
+
+if [ "$PAUSE" = true ]; then
+    echo ""
+    read -p "Pressione ENTER para fechar..."
+fi

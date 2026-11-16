@@ -1,0 +1,10 @@
+# Set default behavior to automatically handle line endings
+* text=auto
+
+# Ensure shell scripts maintain LF line endings for Linux/Android/Termux
+*.sh text eol=lf
+scripts/rfdiag text eol=lf
+scripts/siminfo text eol=lf
+
+# Windows batch files
+*.bat text eol=crlf

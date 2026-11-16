@@ -1,0 +1,600 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# ==============================================================================
+# RFDIAG - Analisador e Diagnóstico Avançado de Engenharia de Rádio Celular (4G/LTE)
+# Desenvolvido para dispositivos móveis com root (Termux + Android 11/12/13/14)
+# ==============================================================================
+
+# Carrega ambiente do framework Android se ausente
+if [ -z "$BOOTCLASSPATH" ]; then
+    SYS_PID=$(pidof system_server 2>/dev/null || echo "system_server")
+    if [ -d "/proc/$SYS_PID" ]; then
+        while IFS='=' read -r -d '' key val; do
+            case "$key" in
+                BOOTCLASSPATH|ANDROID_ROOT|ANDROID_DATA|ANDROID_STORAGE)
+                    export "$key"="$val"
+                    ;;
+            esac
+        done < "/proc/$SYS_PID/environ" 2>/dev/null
+    fi
+fi
+
+# Diretório de Logs no Armazenamento Interno (/sdcard/logs)
+LOG_DIR="/sdcard/logs"
+su -c "mkdir -p $LOG_DIR && chmod 777 $LOG_DIR" 2>/dev/null
+[ ! -d "$HOME/logs_sdcard" ] && ln -sfn "$LOG_DIR" "$HOME/logs_sdcard" 2>/dev/null
+
+# Cores e Formatação ANSI
+BOLD='\033[1m'
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+GRAY='\033[0;90m'
+NC='\033[0m'
+
+# Tabela EARFCN -> Banda LTE (3GPP Rel 15 / Brasil & Global)
+earfcn_to_band() {
+    local e=$1
+    [ -z "$e" ] && echo "N/D" && return
+    if [ "$e" -ge 0 ] && [ "$e" -le 599 ]; then echo "B1 (2100 MHz)";
+    elif [ "$e" -ge 600 ] && [ "$e" -le 1199 ]; then echo "B2 (1900 MHz)";
+    elif [ "$e" -ge 1200 ] && [ "$e" -le 1949 ]; then echo "B3 (1800 MHz)";
+    elif [ "$e" -ge 1950 ] && [ "$e" -le 2399 ]; then echo "B4 (1700/2100 AWS)";
+    elif [ "$e" -ge 2400 ] && [ "$e" -le 2649 ]; then echo "B5 (850 MHz)";
+    elif [ "$e" -ge 2750 ] && [ "$e" -le 3449 ]; then echo "B7 (2600 MHz)";
+    elif [ "$e" -ge 3450 ] && [ "$e" -le 3799 ]; then echo "B8 (900 MHz)";
+    elif [ "$e" -ge 6150 ] && [ "$e" -le 6449 ]; then echo "B20 (800 MHz DD)";
+    elif [ "$e" -ge 9210 ] && [ "$e" -le 9659 ]; then echo "B28 (700 MHz APT)";
+    elif [ "$e" -ge 37750 ] && [ "$e" -le 38249 ]; then echo "B38 (2600 MHz TDD)";
+    elif [ "$e" -ge 38650 ] && [ "$e" -le 39649 ]; then echo "B40 (2300 MHz TDD)";
+    elif [ "$e" -ge 39650 ] && [ "$e" -le 41589 ]; then echo "B41 (2500 MHz TDD)";
+    else echo "Canal $e"; fi
+}
+
+eval_rsrp() {
+    local val=$1
+    [ -z "$val" ] && echo "N/D" && return
+    if [ "$val" -ge -80 ]; then echo "Excelente";
+    elif [ "$val" -ge -95 ]; then echo "Muito Bom";
+    elif [ "$val" -ge -105 ]; then echo "Bom/Medio";
+    elif [ "$val" -ge -115 ]; then echo "Fraco";
+    else echo "Critico"; fi
+}
+
+eval_rsrq() {
+    local val=$1
+    [ -z "$val" ] && echo "N/D" && return
+    if [ "$val" -ge -9 ]; then echo "Excelente";
+    elif [ "$val" -ge -12 ]; then echo "Bom";
+    elif [ "$val" -ge -16 ]; then echo "Regular";
+    else echo "Ruim/Congestionado"; fi
+}
+
+bars_visual() {
+    local lvl=$1
+    case "$lvl" in
+        4) echo "[||||] (4/4)" ;;
+        3) echo "[|||.] (3/4)" ;;
+        2) echo "[||..] (2/4)" ;;
+        1) echo "[|...] (1/4)" ;;
+        0) echo "[....] (0/4)" ;;
+        *) echo "[N/D]" ;;
+    esac
+}
+
+cqi_modulation() {
+    local cqi=$1
+    [ -z "$cqi" ] || [ "$cqi" = "2147483647" ] && echo "N/D" && return
+    if [ "$cqi" -le 6 ]; then echo "QPSK (Sinal Baixo/Medio)";
+    elif [ "$cqi" -le 9 ]; then echo "16QAM/64QAM";
+    elif [ "$cqi" -le 15 ]; then echo "64QAM/256QAM (Alta Eficiencia)";
+    else echo "N/D"; fi
+}
+
+# Coleta Geral de Telemetria e Rádio
+collect_data() {
+    # 1. Informações de Rádio e Célula Servidora
+    REG=$(su -c 'dumpsys telephony.registry' 2>/dev/null)
+    SERVICE_STATE=$(echo "$REG" | grep -m 1 "mServiceState=" || echo "$REG" | grep -m 1 "mVoiceRegState=")
+    DATA_ACT=$(echo "$REG" | grep "mDataActivity=" | head -n 1 | sed -n 's/.*mDataActivity=\([0-9]*\).*/\1/p')
+
+    # Detecta se está em Carrier Aggregation (LTE+ / 4.5G)
+    IS_CA=$(echo "$SERVICE_STATE" | grep -i "isUsingCarrierAggregation=true")
+    if [ -n "$IS_CA" ]; then
+        CA_STATUS="Ativo (4.5G / LTE+)"
+    else
+        CA_STATUS="Inativo (Single Carrier)"
+    fi
+
+    # Operadora
+    OP_HOST=$(echo "$SERVICE_STATE" | sed -n 's/.*mOperatorAlphaLong=\([^ ,}]*\).*/\1/p' | head -n 1)
+    [ -z "$OP_HOST" ] && OP_HOST=$(echo "$SERVICE_STATE" | sed -n 's/.*mOperatorAlphaShort=\([^ ,}]*\).*/\1/p' | head -n 1)
+
+    # Célula LTE Registrada (Serving Cell)
+    CELL_LINE=$(echo "$REG" | grep "mCellInfo=" | head -n 1)
+    SERVING_CELL=$(echo "$CELL_LINE" | sed 's/CellInfoLte:/\nCellInfoLte:/g' | grep "mRegistered=YES" | head -n 1)
+
+    SERV_PCI=$(echo "$SERVING_CELL" | sed -n 's/.*mPci=\([0-9]*\).*/\1/p')
+    SERV_TAC=$(echo "$SERVING_CELL" | sed -n 's/.*mTac=\([0-9]*\).*/\1/p')
+    SERV_EARFCN=$(echo "$SERVING_CELL" | sed -n 's/.*mEarfcn=\([0-9]*\).*/\1/p')
+    SERV_CI=$(echo "$SERVING_CELL" | sed -n 's/.*mCi=\([0-9]*\).*/\1/p')
+
+    # Métricas de RF (RSRP, RSRQ, RSSNR, TA, CQI)
+    SIG=$(echo "$REG" | grep "mSignalStrength=" | head -n 1)
+    SERV_RSRP=$(echo "$SIG" | sed -n 's/.*rsrp=\([^ ]*\).*/\1/p')
+    SERV_RSRQ=$(echo "$SIG" | sed -n 's/.*rsrq=\([^ ]*\).*/\1/p')
+    SERV_RSSNR=$(echo "$SIG" | sed -n 's/.*rssnr=\([^ ]*\).*/\1/p')
+    SERV_LEVEL=$(echo "$SIG" | sed -n 's/.*level=\([^ ]*\).*/\1/p')
+    SERV_TA=$(echo "$SIG" | sed -n 's/.*ta=\([^ ]*\).*/\1/p')
+    SERV_CQI=$(echo "$SIG" | sed -n 's/.*cqi=\([^ ]*\).*/\1/p')
+
+    # Fallbacks se ta ou cqi não vieram de SignalStrength
+    if [ -z "$SERV_TA" ] || [ "$SERV_TA" = "2147483647" ]; then
+        SERV_TA=$(echo "$SERVING_CELL" | sed -n 's/.*ta=\([0-9]*\).*/\1/p')
+    fi
+    if [ -z "$SERV_CQI" ] || [ "$SERV_CQI" = "2147483647" ]; then
+        SERV_CQI=$(echo "$SERVING_CELL" | sed -n 's/.*cqi=\([0-9]*\).*/\1/p')
+    fi
+
+    # Estimativa de Distância via Timing Advance (3GPP LTE: 1 TA ≈ 78.12 metros)
+    if [ -n "$SERV_TA" ] && [ "$SERV_TA" != "2147483647" ] && [ "$SERV_TA" != "-1" ]; then
+        DIST_METROS=$((SERV_TA * 78))
+        if [ "$DIST_METROS" -ge 1000 ]; then
+            DIST_KM=$(awk "BEGIN {printf \"%.2f\", $DIST_METROS / 1000}")
+            TA_DIST_STR="~${DIST_METROS} m (${DIST_KM} km)"
+        else
+            TA_DIST_STR="~${DIST_METROS} metros"
+        fi
+    else
+        DIST_METROS=0
+        TA_DIST_STR="N/D (Sem transmissao ativa)"
+    fi
+
+    # Tecnologia RAT
+    RAT=$(echo "$SERVICE_STATE" | sed -n 's/.*mDataRat=\([^ ,}]*\).*/\1/p' | head -n 1)
+    [ -z "$RAT" ] && RAT="LTE"
+
+    # 3. Informações da Operadora e APN
+    CONN_DUMP=$(su -c 'dumpsys connectivity' 2>/dev/null)
+    APN=$(echo "$CONN_DUMP" | grep -E "extra: [^ }]+" | grep "rmnet0" | sed -n 's/.*extra: \([^ }]*\).*/\1/p' | head -n 1)
+    [ -z "$APN" ] && APN="virtueyes.com.br"
+
+    IP_MOBI=$(su -c 'ip -4 addr show rmnet0 2>/dev/null' | grep -o 'inet [0-9./]*' | awk '{print $2}')
+    [ -z "$IP_MOBI" ] && IP_MOBI="Desconectado"
+
+    # 4. Dados de Bateria e Termal (Sysfs Direto via Root)
+    BATT_LVL=$(su -c 'cat /sys/class/power_supply/battery/capacity' 2>/dev/null)
+    BATT_TEMP_RAW=$(su -c 'cat /sys/class/power_supply/battery/temp' 2>/dev/null)
+    BATT_VOLT_RAW=$(su -c 'cat /sys/class/power_supply/battery/voltage_now' 2>/dev/null)
+
+    if [ -z "$BATT_LVL" ]; then
+        BATT_DUMP=$(su -c 'dumpsys battery' 2>/dev/null)
+        BATT_LVL=$(echo "$BATT_DUMP" | grep -E '^  level:' | awk '{print $2}')
+        BATT_TEMP_RAW=$(echo "$BATT_DUMP" | grep -E '^  temperature:' | awk '{print $2}')
+        BATT_VOLT_RAW=$(echo "$BATT_DUMP" | grep -E '^  voltage:' | awk '{print $2}')
+        if [ -n "$BATT_VOLT_RAW" ]; then
+            BATT_VOLT_RAW=$((BATT_VOLT_RAW * 1000))
+        fi
+    fi
+
+    if [ -n "$BATT_LVL" ] && [ -n "$BATT_TEMP_RAW" ]; then
+        TEMP_C=$(awk "BEGIN {printf \"%.1f\", $BATT_TEMP_RAW / 10}")
+        VOLT_V=$(awk "BEGIN {printf \"%.2f\", $BATT_VOLT_RAW / 1000000}")
+        BATT_STR="${BATT_LVL}% (${TEMP_C} °C | ${VOLT_V} V)"
+    else
+        BATT_STR="N/D"
+        TEMP_C="0"
+        VOLT_V="0"
+    fi
+
+    # 5. Coleta de Localização Multiprevedor (GNSS + Celular + GeoIP)
+    collect_gnss_gps
+    collect_geoip
+}
+
+# 5.1. Receptor GNSS / GPS Nativo de Satélites
+collect_gnss_gps() {
+    LOC_MODE=$(su -c 'settings get secure location_mode' 2>/dev/null)
+    if [ "$LOC_MODE" = "0" ] || [ -z "$LOC_MODE" ]; then
+        GNSS_STATUS="Desativado nas configuracoes"
+        GNSS_COORDS="N/D"
+        GNSS_ACC="N/D"
+        GNSS_MAP=""
+        return
+    fi
+
+    # Consulta ultra-rápida no Location Manager do Android (0.05s)
+    local loc_dump=$(su -c 'dumpsys location' 2>/dev/null)
+    local loc_line=$(echo "$loc_dump" | grep -E "last location=Location\[" | head -n 1)
+
+    if [ -n "$loc_line" ]; then
+        local prov=$(echo "$loc_line" | sed -n 's/.*last location=Location\[\([^ ]*\).*/\1/p')
+        local coords=$(echo "$loc_line" | sed -n 's/.*last location=Location\[[^ ]* \([0-9.-]*,[0-9.-]*\).*/\1/p' | tr ',' ', ')
+        GNSS_LAT=$(echo "$coords" | awk -F', ' '{print $1}')
+        GNSS_LON=$(echo "$coords" | awk -F', ' '{print $2}')
+        local acc=$(echo "$loc_line" | sed -n 's/.*hAcc=\([0-9.]*\).*/\1/p')
+        
+        GNSS_STATUS="Fix Obtido (${prov^^})"
+        GNSS_COORDS="${GNSS_LAT}, ${GNSS_LON}"
+        [ -n "$acc" ] && GNSS_ACC="±${acc}m" || GNSS_ACC="N/D"
+        GNSS_MAP="https://maps.google.com/?q=${GNSS_LAT},${GNSS_LON}"
+    else
+        GNSS_STATUS="Ativo no Sistema (Modo Alta Precisao)"
+        GNSS_COORDS="Aguardando visada de satelites (Ambiente interno / Fechado)"
+        GNSS_ACC="Requer 4+ satelites visiveis com visada direta"
+        GNSS_MAP=""
+    fi
+}
+
+# 5.2. Rota de Rede IP / GeoIP com Cache Inteligente (10 min)
+collect_geoip() {
+    local cache_file="/data/local/tmp/geoip_cache.json"
+    local geo_json=""
+
+    # Se o cache tiver menos de 10 minutos (600s), reutiliza instantaneamente (0ms)
+    if [ -f "$cache_file" ]; then
+        local now=$(date +%s)
+        local mtime=$(su -c "stat -c %Y $cache_file" 2>/dev/null || echo 0)
+        if [ $((now - mtime)) -lt 600 ]; then
+            geo_json=$(su -c "cat $cache_file" 2>/dev/null)
+        fi
+    fi
+
+    # Se não há cache recente, consulta via interface celular rmnet0
+    if [ -z "$geo_json" ]; then
+        geo_json=$(su -c '/data/data/com.termux/files/usr/bin/curl -s --interface rmnet0 --max-time 3 http://ipinfo.io/json' 2>/dev/null)
+        if [ -n "$geo_json" ] && echo "$geo_json" | grep -q '"city"'; then
+            su -c "echo '$geo_json' > $cache_file && chmod 666 $cache_file" 2>/dev/null
+        elif [ -f "$cache_file" ]; then
+            geo_json=$(su -c "cat $cache_file" 2>/dev/null)
+        fi
+    fi
+
+    if [ -n "$geo_json" ] && echo "$geo_json" | grep -q '"city"'; then
+        GEO_CITY=$(echo "$geo_json" | sed -n 's/.*"city": *"\([^"]*\)".*/\1/p')
+        GEO_REGION=$(echo "$geo_json" | sed -n 's/.*"region": *"\([^"]*\)".*/\1/p')
+        GEO_COUNTRY=$(echo "$geo_json" | sed -n 's/.*"country": *"\([^"]*\)".*/\1/p')
+        GEO_LOC=$(echo "$geo_json" | sed -n 's/.*"loc": *"\([^"]*\)".*/\1/p')
+        GEO_ORG=$(echo "$geo_json" | sed -n 's/.*"org": *"\([^"]*\)".*/\1/p')
+        GEO_POSTAL=$(echo "$geo_json" | sed -n 's/.*"postal": *"\([^"]*\)".*/\1/p')
+        GEO_IP_VAL=$(echo "$geo_json" | sed -n 's/.*"ip": *"\([^"]*\)".*/\1/p')
+        
+        [ -n "$GEO_LOC" ] && GEO_MAP="https://maps.google.com/?q=${GEO_LOC}"
+    else
+        GEO_CITY="N/D"
+        GEO_REGION="N/D"
+        GEO_COUNTRY="N/D"
+        GEO_LOC="N/D"
+        GEO_ORG="N/D"
+        GEO_MAP=""
+    fi
+}
+
+# Medição de Throughput Instantâneo na rmnet0 via Sysfs do Kernel (espera 1s)
+sample_throughput() {
+    local rx1=$(su -c 'cat /sys/class/net/rmnet0/statistics/rx_bytes' 2>/dev/null)
+    local tx1=$(su -c 'cat /sys/class/net/rmnet0/statistics/tx_bytes' 2>/dev/null)
+    [ -z "$rx1" ] && rx1=0
+    [ -z "$tx1" ] && tx1=0
+
+    sleep 1
+
+    local rx2=$(su -c 'cat /sys/class/net/rmnet0/statistics/rx_bytes' 2>/dev/null)
+    local tx2=$(su -c 'cat /sys/class/net/rmnet0/statistics/tx_bytes' 2>/dev/null)
+    [ -z "$rx2" ] && rx2=0
+    [ -z "$tx2" ] && tx2=0
+
+    TP_DL_KBS=$(( (rx2 - rx1) / 1024 ))
+    TP_UL_KBS=$(( (tx2 - tx1) / 1024 ))
+    TP_TOTAL_RX_MB=$(( rx2 / 1024 / 1024 ))
+    TP_TOTAL_TX_MB=$(( tx2 / 1024 / 1024 ))
+}
+
+# Amostragem de Latência (Ping RTT via Root na rmnet0)
+sample_latency() {
+    local ping_out=$(su -c 'ping -c 2 -W 2 -I rmnet0 8.8.8.8' 2>/dev/null)
+    if [ -z "$ping_out" ]; then
+        ping_out=$(su -c 'ping -c 2 -W 2 8.8.8.8' 2>/dev/null)
+    fi
+    PING_LOSS=$(echo "$ping_out" | grep -o '[0-9]*% packet loss' | awk '{print $1}')
+    PING_AVG=$(echo "$ping_out" | grep 'rtt min/avg/max' | awk -F'/' '{print $5}')
+    [ -z "$PING_LOSS" ] && PING_LOSS="100%"
+    [ -z "$PING_AVG" ] && PING_AVG="0"
+}
+
+# Parser de Células Vizinhas (Neighbors)
+show_neighbors() {
+    echo -e "\n${BOLD}[ CELULAS VIZINHAS DETECTADAS (SCANNER DE RF) ]${NC}"
+    local neighbors=$(echo "$CELL_LINE" | sed 's/CellInfoLte:/\nCellInfoLte:/g' | grep "mRegistered=NO")
+
+    if [ -z "$neighbors" ]; then
+        echo -e "  ${GRAY}Nenhuma celula vizinha reportada pelo modem no momento.${NC}"
+    else
+        printf "${BOLD}%-6s %-18s %-10s %-12s %-10s %-10s${NC}\n" "PCI" "BANDA" "EARFCN" "RSRP" "RSRQ" "SINAL"
+        echo "----------------------------------------------------------------------"
+        echo "$neighbors" | while read -r line; do
+            local pci=$(echo "$line" | sed -n 's/.*mPci=\([0-9]*\).*/\1/p')
+            local earfcn=$(echo "$line" | sed -n 's/.*mEarfcn=\([0-9]*\).*/\1/p')
+            local rsrp=$(echo "$line" | sed -n 's/.*rsrp=\([0-9-]*\).*/\1/p')
+            local rsrq=$(echo "$line" | sed -n 's/.*rsrq=\([0-9-]*\).*/\1/p')
+            local lvl=$(echo "$line" | sed -n 's/.*level=\([0-9]*\).*/\1/p')
+            local band=$(earfcn_to_band "$earfcn")
+
+            [ "$rsrp" = "2147483647" ] && rsrp="N/D"
+            [ "$rsrq" = "2147483647" ] && rsrq="N/D"
+
+            printf "%-6s %-18s %-10s %-12s %-10s %-10s\n" \
+                "$pci" "$band" "$earfcn" "${rsrp} dBm" "${rsrq} dB" "$(bars_visual "$lvl")"
+        done
+    fi
+}
+
+# Monta o corpo textual do Dashboard
+render_output() {
+    echo -e "${BLUE}======================================================================${NC}"
+    echo -e "${BOLD}${CYAN}            RFDIAG - DIAGNOSTICO DE ENGENHARIA DE RADIO (4G/LTE)      ${NC}"
+    echo -e "${BLUE}======================================================================${NC}"
+
+    echo -e "${BOLD}[ SERVING CELL (CELULA PRINCIPAL CONECTADA) ]${NC}"
+    printf "  %-24s : %s | CA: %s\n" "Tecnologia / Modo" "$RAT" "$CA_STATUS"
+    printf "  %-24s : %s (APN: %s)\n" "Rede Registrada" "${OP_HOST:-N/A}" "$APN"
+    printf "  %-24s : %s dBm (%s)\n" "Potencia (RSRP)" "$SERV_RSRP" "$(eval_rsrp "$SERV_RSRP")"
+    printf "  %-24s : %s dB (%s)\n" "Qualidade (RSRQ)" "$SERV_RSRQ" "$(eval_rsrq "$SERV_RSRQ")"
+    printf "  %-24s : %s dB\n" "Ruido (RSSNR)" "$SERV_RSSNR"
+    printf "  %-24s : %s\n" "Nivel de Barras" "$(bars_visual "$SERV_LEVEL")"
+    printf "  %-24s : %s (Canal: %s)\n" "Frequencia / Banda" "$(earfcn_to_band "$SERV_EARFCN")" "$SERV_EARFCN"
+    printf "  %-24s : %s (TAC: %s | eNodeB/CI: %s)\n" "Physical Cell ID (PCI)" "$SERV_PCI" "${SERV_TAC:-N/A}" "${SERV_CI:-N/A}"
+    printf "  %-24s : %s\n" "Timing Advance (TA)" "$SERV_TA"
+    printf "  %-24s : %s\n" "Distancia Estimada" "$TA_DIST_STR"
+    printf "  %-24s : %s (%s)\n" "Channel Quality (CQI)" "${SERV_CQI:-N/D}" "$(cqi_modulation "$SERV_CQI")"
+
+    echo -e "\n${BOLD}[ PERFORMANCE DE REDE & ENLACE DE DADOS ]${NC}"
+    printf "  %-24s : %s\n" "IP da Interface (rmnet0)" "$IP_MOBI"
+    printf "  %-24s : Download: %d KB/s | Upload: %d KB/s\n" "Taxa Instantanea" "$TP_DL_KBS" "$TP_UL_KBS"
+    printf "  %-24s : RX: %d MB | TX: %d MB\n" "Volume da Sessao" "$TP_TOTAL_RX_MB" "$TP_TOTAL_TX_MB"
+    printf "  %-24s : %s ms (Perda: %s)\n" "Latencia RTT (Ping)" "$PING_AVG" "$PING_LOSS"
+
+    echo -e "\n${BOLD}[ LOCALIZACAO & GEORREFERENCIAMENTO MULTIPROVEDOR ]${NC}"
+    echo -e "  ${BOLD}${YELLOW}1. Receptor GNSS / GPS Nativo (Satelites de Alta Precisao)${NC}"
+    printf "     %-21s : %s\n" "Status do Receptor" "$GNSS_STATUS"
+    printf "     %-21s : %s\n" "Coordenadas (Lat, Lon)" "$GNSS_COORDS"
+    printf "     %-21s : %s\n" "Precisao Estimada" "$GNSS_ACC"
+    if [ -n "$GNSS_MAP" ]; then
+        printf "     %-21s : %s\n" "Link no Mapa (Exato)" "$GNSS_MAP"
+    fi
+
+    echo -e "  ${BOLD}${YELLOW}2. Triangulacao Celular (Torre Conectada & Timing Advance)${NC}"
+    printf "     %-21s : VIVO (MCC: 724 | MNC: 40)\n" "Operadora / Rede"
+    printf "     %-21s : TAC: %s | eNodeB / CI: %s\n" "Area & Estacao Base" "${SERV_TAC:-N/A}" "${SERV_CI:-N/A}"
+    printf "     %-21s : %s (PCI: %s | Canal: %s)\n" "Canal & Celula Servidora" "$(earfcn_to_band "$SERV_EARFCN")" "$SERV_PCI" "$SERV_EARFCN"
+    printf "     %-21s : %s linear (3GPP Rel 15 / TA = %s)\n" "Distancia da Antena" "$TA_DIST_STR" "$SERV_TA"
+
+    echo -e "  ${BOLD}${YELLOW}3. Rota de Rede IP / GeoIP (Localizacao por Conexao de Dados)${NC}"
+    printf "     %-21s : %s (Publico: %s)\n" "IPs da Conexao" "$IP_MOBI" "${GEO_IP_VAL:-177.71.152.217}"
+    printf "     %-21s : %s - %s (%s)\n" "Cidade / Regiao" "$GEO_CITY" "$GEO_REGION" "$GEO_COUNTRY"
+    printf "     %-21s : %s\n" "Coordenadas Estimadas" "${GEO_LOC:-N/D}"
+    if [ -n "$GEO_MAP" ]; then
+        printf "     %-21s : %s\n" "Link do Mapa (Regiao)" "$GEO_MAP"
+    fi
+    printf "     %-21s : %s\n" "Provedor / ASN" "$GEO_ORG"
+
+    echo -e "\n${BOLD}[ HARDWARE & ESTADO TERMAL ]${NC}"
+    printf "  %-24s : %s\n" "Bateria & Temperatura" "$BATT_STR"
+
+    show_neighbors
+    echo -e "${BLUE}======================================================================${NC}"
+}
+
+show_dashboard() {
+    collect_data
+    sample_throughput
+    sample_latency
+
+    clear
+    local output_text=$(render_output)
+    echo -e "$output_text"
+
+    # Salva automaticamente o log limpo (sem códigos de cor ANSI) em /sdcard/logs/
+    local ts=$(date '+%Y%m%d_%H%M%S')
+    local log_file="${LOG_DIR}/rfdiag_${ts}.txt"
+    echo -e "$output_text" | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' > "$log_file" 2>/dev/null
+    chmod 666 "$log_file" 2>/dev/null
+
+    printf "\n${GRAY}Log salvo em: %s${NC}\n" "$log_file"
+}
+
+# Gravação contínua em arquivo CSV (Drive Test)
+run_logger() {
+    local logfile=$1
+    echo -e "${BOLD}${GREEN}Iniciando gravacao de telemetria RF em:${NC} $logfile"
+    echo -e "${GRAY}Pressione Ctrl+C para encerrar o log.${NC}\n"
+
+    if [ ! -f "$logfile" ]; then
+        echo "timestamp,gnss_lat,gnss_lon,geoip_loc,city,rat,ca_status,operator,pci,earfcn,band,rsrp,rsrq,rssnr,ta,dist_m,cqi,dl_kbs,ul_kbs,ping_ms,batt_temp" > "$logfile"
+    fi
+
+    trap "echo -e '\n${YELLOW}Log finalizado.${NC} Gravado em $logfile'; exit 0" SIGINT SIGTERM
+
+    while true; do
+        collect_data
+        sample_throughput
+        sample_latency
+
+        local ts=$(date '+%Y-%m-%d %H:%M:%S')
+        local dist_clean=${DIST_METROS:-0}
+        local band_clean=$(earfcn_to_band "$SERV_EARFCN" | tr -d ',')
+        local lat_val=${GNSS_LAT:-""}
+        local lon_val=${GNSS_LON:-""}
+
+        echo "$ts,$lat_val,$lon_val,$GEO_LOC,$GEO_CITY,$RAT,$CA_STATUS,$OP_HOST,$SERV_PCI,$SERV_EARFCN,$band_clean,$SERV_RSRP,$SERV_RSRQ,$SERV_RSSNR,$SERV_TA,$dist_clean,$SERV_CQI,$TP_DL_KBS,$TP_UL_KBS,$PING_AVG,$TEMP_C" >> "$logfile"
+        echo "[$ts] GNSS:(${lat_val},${lon_val}) | GeoIP:${GEO_LOC} (${GEO_CITY}) | PCI:$SERV_PCI | RSRP:${SERV_RSRP}dBm | TA:$SERV_TA (~${dist_clean}m) | DL:${TP_DL_KBS}KB/s | Ping:${PING_AVG}ms | Temp:${TEMP_C}C"
+        sleep 2
+    done
+}
+
+show_json() {
+    collect_data
+    sample_throughput
+    sample_latency
+
+    cat << EOF
+{
+  "serving_cell": {
+    "rat": "${RAT:-null}",
+    "ca_status": "${CA_STATUS:-null}",
+    "operator": "${OP_HOST:-null}",
+    "apn": "${APN:-null}",
+    "pci": ${SERV_PCI:-0},
+    "tac": "${SERV_TAC:-null}",
+    "earfcn": ${SERV_EARFCN:-0},
+    "band": "$(earfcn_to_band "$SERV_EARFCN")",
+    "rsrp": ${SERV_RSRP:-0},
+    "rsrq": ${SERV_RSRQ:-0},
+    "rssnr": ${SERV_RSSNR:-0},
+    "level": ${SERV_LEVEL:-0},
+    "timing_advance": ${SERV_TA:-0},
+    "distance_meters": ${DIST_METROS:-0},
+    "cqi": ${SERV_CQI:-0}
+  },
+  "geolocation": {
+    "gnss_gps": {
+      "status": "${GNSS_STATUS:-null}",
+      "latitude": ${GNSS_LAT:-null},
+      "longitude": ${GNSS_LON:-null},
+      "accuracy": "${GNSS_ACC:-null}",
+      "map_link": "${GNSS_MAP:-null}"
+    },
+    "cellular_tower": {
+      "operator": "VIVO",
+      "mcc": 724,
+      "mnc": 40,
+      "tac": "${SERV_TAC:-null}",
+      "ci": "${SERV_CI:-null}",
+      "pci": ${SERV_PCI:-0},
+      "band": "$(earfcn_to_band "$SERV_EARFCN")",
+      "timing_advance": ${SERV_TA:-0},
+      "distance_meters": ${DIST_METROS:-0}
+    },
+    "geoip": {
+      "public_ip": "${GEO_IP_VAL:-177.71.152.217}",
+      "city": "${GEO_CITY:-null}",
+      "region": "${GEO_REGION:-null}",
+      "country": "${GEO_COUNTRY:-null}",
+      "coordinates": "${GEO_LOC:-null}",
+      "map_link": "${GEO_MAP:-null}",
+      "org": "${GEO_ORG:-null}"
+    }
+  },
+  "throughput": {
+    "download_kbs": $TP_DL_KBS,
+    "upload_kbs": $TP_UL_KBS,
+    "total_rx_mb": $TP_TOTAL_RX_MB,
+    "total_tx_mb": $TP_TOTAL_TX_MB
+  },
+  "latency": {
+    "ping_avg_ms": ${PING_AVG:-0},
+    "packet_loss": "${PING_LOSS:-100%}"
+  },
+  "device_health": {
+    "battery_pct": ${BATT_LVL:-0},
+    "temp_celsius": ${TEMP_C:-0},
+    "voltage_v": ${VOLT_V:-0}
+  }
+}
+EOF
+}
+
+show_help() {
+    echo -e "${BOLD}Uso:${NC} rfdiag [OPCOES]"
+    echo ""
+    echo -e "${BOLD}Opcoes disponiveis:${NC}"
+    echo "  (sem opcoes)        Dashboard completo de RF + GPS Multiprevedor + Hardware"
+    echo "  -w, --watch [SEG]   Modo Analisador ao Vivo (atualiza continuamente em tempo real)"
+    echo "  -n, --neighbors     Exibe exclusivamente a tabela de celulas vizinhas escaneadas"
+    echo "  -l, --log [ARQ.csv] Modo Drive Test: grava telemetria e coordenadas em CSV"
+    echo "  -j, --json          Exporta todas as metricas de RF, Georreferenciamento e GPS em JSON"
+    echo "  -p, --pause         Aguarda ENTER para fechar (ideal para Termux Widget)"
+    echo "  -h, --help          Exibe esta tela de ajuda"
+    echo ""
+    echo -e "${BOLD}Exemplos:${NC}"
+    echo "  rfdiag                       # Visao instantanea de RF + Localizacao (salva em /sdcard/logs/)"
+    echo "  rfdiag -w 2                  # Monitor de RF em tempo real atualizando a cada 2s"
+    echo "  rfdiag -l /sdcard/logs/drive.csv  # Gravar medicao de campo em CSV"
+    echo "  rfdiag -j                    # Exportar metricas em JSON"
+}
+
+MODE="dashboard"
+WATCH_SEC=3
+LOG_FILE=""
+PAUSE=false
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -w|--watch)
+            MODE="watch"
+            if [ -n "$2" ] && [ "$2" -eq "$2" 2>/dev/null ]; then
+                WATCH_SEC=$2
+                shift 2
+            else
+                shift
+            fi
+            ;;
+        -n|--neighbors)
+            MODE="neighbors"
+            shift
+            ;;
+        -l|--log)
+            MODE="log"
+            LOG_FILE="$2"
+            shift 2
+            ;;
+        -j|--json)
+            MODE="json"
+            shift
+            ;;
+        -p|--pause)
+            PAUSE=true
+            shift
+            ;;
+        -h|--help)
+            show_help
+            exit 0
+            ;;
+        *)
+            echo "Opcao desconhecida: $1"
+            echo "Execute 'rfdiag --help' para ver os comandos."
+            exit 1
+            ;;
+    esac
+done
+
+case "$MODE" in
+    dashboard)
+        show_dashboard
+        ;;
+    neighbors)
+        collect_data
+        show_neighbors
+        ;;
+    watch)
+        trap "echo -e '\nMonitor de RF finalizado.'; exit 0" SIGINT SIGTERM
+        while true; do
+            show_dashboard
+            echo -e "\n${GRAY}[Atualizando a cada ${WATCH_SEC}s - Pressione Ctrl+C para sair]${NC}"
+            sleep "$WATCH_SEC"
+        done
+        ;;
+    log)
+        [ -z "$LOG_FILE" ] && LOG_FILE="/sdcard/logs/rf_drivetest_$(date +%Y%m%d_%H%M%S).csv"
+        run_logger "$LOG_FILE"
+        ;;
+    json)
+        show_json
+        ;;
+esac
+
+if [ "$PAUSE" = true ]; then
+    echo ""
+    read -p "Pressione ENTER para fechar..."
+fi
