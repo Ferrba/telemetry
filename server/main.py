@@ -235,8 +235,8 @@ def dedupe_pings(rows) -> Dict[str, List[Dict[str, Any]]]:
             if cur["rtt"] is None and r["rtt"] is not None:
                 cur["rtt"] = r["rtt"]
     out: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-    for (target, _run, _seq), v in pk.items():
-        out[target].append(v)
+    for k_tup, v in pk.items():
+        out[k_tup[0]].append(v)
     for t in out:
         out[t].sort(key=lambda x: x["ts"])
     return out
@@ -765,6 +765,412 @@ async def minute_table(device_id: Optional[str] = None, minutes: int = Query(15,
         })
 
     return {"device_id": dev, "targets": targets_sorted, "minutes": minutes_consolidated, "rows": out}
+
+
+@app.get("/api/v3/workbench")
+async def workbench(device_id: Optional[str] = None, window_s: int = Query(900, ge=60, le=86400)):
+    """
+    Endpoint unificado para a bancada tecnica (estilo d-tecnico):
+    correlaciona serie temporal de RTT + camada de radio + eventos + alvos +
+    celulas observadas + GPS + coletores/bruto em uma unica chamada.
+    """
+    conn = get_db()
+    try:
+        dev = resolve_device(conn, device_id)
+        if not dev:
+            return {"status": "empty"}
+        now = time.time()
+
+        last_b = conn.execute(
+            "SELECT * FROM ingest_batches WHERE device_id=? ORDER BY received_at DESC LIMIT 1", (dev,)
+        ).fetchone()
+        first_b = conn.execute(
+            "SELECT MIN(received_at) AS first_seen, COUNT(*) AS total_batches FROM ingest_batches WHERE device_id=?", (dev,)
+        ).fetchone()
+
+        max_ping_row = conn.execute(
+            "SELECT MAX(ts) AS t FROM ping_samples WHERE device_id=?", (dev,)
+        ).fetchone()
+        max_radio_row = conn.execute(
+            "SELECT MAX(ts) AS t FROM radio_samples WHERE device_id=?", (dev,)
+        ).fetchone()
+        ref_end = max(max_ping_row["t"] or 0, max_radio_row["t"] or 0) or now
+        since = ref_end - window_s
+
+        prows = conn.execute(
+            "SELECT ts, target, run, seq, rtt FROM ping_samples WHERE device_id=? AND ts > ? AND ts <= ? ORDER BY ts",
+            (dev, since, ref_end),
+        ).fetchall()
+        rrows = conn.execute(
+            "SELECT * FROM radio_samples WHERE device_id=? AND ts > ? AND ts <= ? ORDER BY ts",
+            (dev, since - 30, ref_end),
+        ).fetchall()
+        nrows = conn.execute(
+            "SELECT * FROM network_samples WHERE device_id=? AND ts > ? ORDER BY ts",
+            (dev, now - 86400),
+        ).fetchall()
+        grows = conn.execute(
+            "SELECT * FROM gps_samples WHERE device_id=? ORDER BY ts DESC LIMIT 120",
+            (dev,),
+        ).fetchall()
+        drow = conn.execute(
+            "SELECT * FROM device_samples WHERE device_id=? ORDER BY ts DESC LIMIT 1",
+            (dev,),
+        ).fetchone()
+        r_all_24h = conn.execute(
+            """SELECT pci, earfcn, COUNT(*) AS samples, ROUND(AVG(rsrp),1) AS rsrp_avg,
+                      MIN(rsrp) AS rsrp_min, MAX(rsrp) AS rsrp_max, MAX(ts) AS last_ts
+               FROM radio_samples WHERE device_id=? AND pci IS NOT NULL AND ts > ?
+               GROUP BY pci, earfcn ORDER BY last_ts DESC LIMIT 12""",
+            (dev, now - 86400),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    deduped = dedupe_pings(prows)
+    targets = sorted(deduped.keys())
+    primary_t = "1.1.1.1" if "1.1.1.1" in deduped else (targets[0] if targets else "1.1.1.1")
+    secondary_t = "8.8.4.4" if "8.8.4.4" in deduped and primary_t != "8.8.4.4" else (targets[1] if len(targets) > 1 else None)
+
+    radio_list = [radio_row(r) for r in rrows]
+    last_radio = radio_list[-1] if radio_list else None
+
+    # Eventos de rede e de radio (handover / CA / IP)
+    net_events = route_transitions(nrows)
+    corr_events = []
+    for e in net_events:
+        if e["type"] == "TROCA_IP_PUBLICO":
+            corr_events.append({"ts": e["ts"], "kind": "IP PUB", "detail": f"IP público alterado {e['old']} → {e['new']}", "bad": True, "short": f"IP→{e['new']}"})
+        else:
+            corr_events.append({"ts": e["ts"], "kind": "IP MOV", "detail": f"IP rmnet0 alterado {e['old']} → {e['new']}", "bad": False, "short": f"rmnet0→{e['new']}"})
+
+    for i in range(1, len(radio_list)):
+        a, b = radio_list[i - 1], radio_list[i]
+        if a["pci"] is not None and b["pci"] is not None and a["pci"] != b["pci"]:
+            corr_events.append({
+                "ts": b["ts"], "kind": "HANDOVER",
+                "detail": f"Handover PCI {a['pci']} ({a['band'] or '--'}) → PCI {b['pci']} ({b['band'] or '--'})",
+                "bad": False, "short": f"HO {a['pci']}→{b['pci']}",
+            })
+        elif a.get("ca") != b.get("ca") and b.get("ca") is not None:
+            ca_on = bool(b.get("ca"))
+            corr_events.append({
+                "ts": b["ts"], "kind": "CA" if ca_on else "RAT",
+                "detail": f"{'CA ativada (LTE+ 4.5G)' if ca_on else 'CA desativada (LTE simples)'} · {b.get('band') or '--'} · PCI {b.get('pci')}",
+                "bad": False, "short": "LTE-CA" if ca_on else "LTE",
+            })
+
+    # Passo de tempo para a serie correlacionada do canvas (ate ~600 pontos)
+    step_s = 1 if window_s <= 600 else (2 if window_s <= 1200 else (10 if window_s <= 3600 else 60))
+    p1_list = deduped.get(primary_t, [])
+    p2_list = deduped.get(secondary_t, []) if secondary_t else []
+
+    p1_rtts_all = [p["rtt"] for p in p1_list if p["rtt"] is not None]
+    p50_ref = percentile(p1_rtts_all, 0.5) or 60.0
+    cold_threshold = max(95.0, p50_ref + 35.0)
+
+    p1_buckets: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+    for p in p1_list:
+        p1_buckets[int(p["ts"] // step_s * step_s)].append(p)
+    p2_buckets: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+    for p in p2_list:
+        p2_buckets[int(p["ts"] // step_s * step_s)].append(p)
+
+    all_ts = sorted(set(p1_buckets.keys()) | set(p2_buckets.keys()))
+    ev_by_bucket: Dict[int, str] = {}
+    for ev in corr_events:
+        if ev["ts"] >= since:
+            ev_by_bucket[int(ev["ts"] // step_s * step_s)] = ev["short"]
+
+    # Indexa radio por busca binaria/cursor
+    r_idx = 0
+    r_len = len(radio_list)
+    timeline = []
+    for t in all_ts:
+        while r_idx + 1 < r_len and radio_list[r_idx + 1]["ts"] <= t + step_s:
+            r_idx += 1
+        cur_r = radio_list[r_idx] if r_len else None
+
+        b1 = p1_buckets.get(t, [])
+        rtts1 = [x["rtt"] for x in b1 if x["rtt"] is not None]
+        sent1 = len(b1)
+        lost1 = sent1 - len(rtts1)
+        loss_pct1 = round((lost1 / sent1) * 100.0, 1) if sent1 else 0.0
+        # Preserva picos no bucket para nao esconder promocao RRC/spike
+        rtt1 = round(max(rtts1), 1) if rtts1 else None
+        jit1 = jitter_ms(rtts1) if len(rtts1) >= 2 else 0.0
+
+        b2 = p2_buckets.get(t, [])
+        rtts2 = [x["rtt"] for x in b2 if x["rtt"] is not None]
+        rtt2 = round(max(rtts2), 1) if rtts2 else None
+
+        rat_str = "LTE-CA" if (cur_r and cur_r.get("ca")) else ((cur_r and cur_r.get("rat")) or "LTE")
+        band_short = ((cur_r and cur_r.get("band")) or "B3").split(" ")[0]
+        is_cold = bool(rtt1 is not None and rtt1 >= cold_threshold)
+
+        timeline.append({
+            "t": t,
+            "rtt": rtt1,
+            "rtt2": rtt2,
+            "jitter": jit1 or 0.0,
+            "loss": loss_pct1,
+            "lost": lost1,
+            "sent": sent1,
+            "cold": is_cold,
+            "rat": rat_str,
+            "band": band_short,
+            "pci": cur_r["pci"] if cur_r else None,
+            "rsrp": cur_r["rsrp"] if cur_r else None,
+            "rsrq": cur_r["rsrq"] if cur_r else None,
+            "sinr": cur_r["rssnr"] if cur_r else None,
+            "ta": cur_r["ta"] if cur_r else None,
+            "ev": ev_by_bucket.get(t),
+        })
+
+    # Estatisticas de tabela por alvo
+    targets_table = []
+    target_labels = {
+        "1.1.1.1": "ICMP · 1.1.1.1 (Cloudflare)",
+        "8.8.4.4": "ICMP · 8.8.4.4 (Google DNS)",
+        "8.8.8.8": "ICMP · 8.8.8.8 (Google DNS)",
+    }
+    for tgt in targets:
+        pkts = deduped[tgt]
+        st = stats_for(pkts)
+        rtts = [p["rtt"] for p in pkts if p["rtt"] is not None]
+        last_rtt = round(rtts[-1], 1) if rtts else None
+        p25 = percentile(rtts, 0.25)
+        p50 = percentile(rtts, 0.50)
+        p95 = percentile(rtts, 0.95)
+        p99 = percentile(rtts, 0.99)
+        targets_table.append({
+            "target": tgt,
+            "name": target_labels.get(tgt, f"ICMP · {tgt}"),
+            "interval": "1 s",
+            "last_ms": last_rtt,
+            "avg_ms": st["avg_ms"],
+            "min_ms": st["min_ms"],
+            "max_ms": st["max_ms"],
+            "p25_ms": p25,
+            "p50_ms": p50,
+            "p95_ms": p95,
+            "p99_ms": p99,
+            "jitter_ms": st["jitter_ms"],
+            "loss_pct": st["loss_pct"],
+            "sent": st["sent"],
+            "received": st["received"],
+            "status": st["status"],
+        })
+
+    # Estatisticas globais do alvo primario na janela
+    warm_rtts = [r for r in p1_rtts_all if r < cold_threshold]
+    cold_rtts = [r for r in p1_rtts_all if r >= cold_threshold]
+    p50_warm = percentile(warm_rtts or p1_rtts_all, 0.50)
+    p95_all = percentile(p1_rtts_all, 0.95)
+    p99_all = percentile(p1_rtts_all, 0.99)
+    cold_delta = round((sum(cold_rtts) / len(cold_rtts)) - (p50_warm or 0), 1) if cold_rtts and p50_warm else 0.0
+
+    n_valid = len(p1_rtts_all)
+    if n_valid > 0:
+        b_nom = round(sum(1 for r in p1_rtts_all if r <= 55.0) / n_valid * 100.0, 1)
+        b_elev = round(sum(1 for r in p1_rtts_all if 55.0 < r <= 85.0) / n_valid * 100.0, 1)
+        b_high = round(sum(1 for r in p1_rtts_all if r > 85.0) / n_valid * 100.0, 1)
+    else:
+        b_nom, b_elev, b_high = 0.0, 0.0, 0.0
+
+    # Radio summary + faixas min/max na janela
+    rsrps_win = [r["rsrp"] for r in radio_list if r["rsrp"] is not None]
+    rsrqs_win = [r["rsrq"] for r in radio_list if r["rsrq"] is not None]
+    sinrs_win = [r["rssnr"] for r in radio_list if r["rssnr"] is not None]
+
+    cells_observed = []
+    for cr in r_all_24h:
+        cells_observed.append({
+            "pci": cr["pci"],
+            "earfcn": cr["earfcn"],
+            "band": earfcn_to_band(cr["earfcn"]) or f"CH {cr['earfcn']}",
+            "rsrp_avg": cr["rsrp_avg"],
+            "rsrp_min": cr["rsrp_min"],
+            "rsrp_max": cr["rsrp_max"],
+            "samples": cr["samples"],
+            "active": bool(last_radio and last_radio.get("pci") == cr["pci"] and last_radio.get("earfcn") == cr["earfcn"]),
+        })
+
+    # Rede e IPs
+    last_net = nrows[-1] if nrows else None
+    last_pub = next((r for r in reversed(nrows) if r["ip_public"]), None)
+    distinct_pub_24h = sorted({r["ip_public"] for r in nrows if r["ip_public"]})
+    last_pub_change = next((e for e in reversed(net_events) if e["type"] == "TROCA_IP_PUBLICO"), None)
+
+    # GPS
+    last_gps = dict(grows[0]) if grows else None
+    gps_points = []
+    seen_fix = None
+    for g in reversed(grows):
+        k = (round(g["lat"], 5), round(g["lon"], 5))
+        if k != seen_fix:
+            seen_fix = k
+            gps_points.append({"ts": g["ts"], "lat": g["lat"], "lon": g["lon"], "acc": g["accuracy_m"], "provider": g["provider"]})
+
+    # Eventos ordenados do mais recente para o mais antigo (inclui spikes/perdas relevantes)
+    for pt in timeline:
+        if pt["lost"] > 0:
+            corr_events.append({
+                "ts": pt["t"], "kind": "PERDA",
+                "detail": f"Perda de pacote ICMP em {primary_t} ({pt['lost']}/{pt['sent']} sem resposta · RSRP {pt['rsrp']} dBm)",
+                "bad": True, "short": "PERDA",
+            })
+        elif pt["cold"]:
+            corr_events.append({
+                "ts": pt["t"], "kind": "SPIKE",
+                "detail": f"Pico de latência {pt['rtt']} ms em {primary_t} (+{round(pt['rtt'] - (p50_warm or 60), 1)} ms acima da mediana · PCI {pt['pci']})",
+                "bad": False, "short": "SPIKE",
+            })
+    if first_b and first_b["first_seen"]:
+        corr_events.append({
+            "ts": first_b["first_seen"], "kind": "SONDA",
+            "detail": f"Sessão iniciada: {dev} · agente v{last_b['agent_version'] if last_b else '3.0'} ({first_b['total_batches']} lotes recebidos)",
+            "bad": False, "short": "START",
+        })
+    corr_events.sort(key=lambda x: x["ts"], reverse=True)
+
+    # Coletores e amostras brutas reais para inspecao ("ver bruto")
+    last_p1_samples = p1_list[-12:] if p1_list else []
+    last_p2_samples = p2_list[-12:] if p2_list else []
+    raw_samples = {
+        "ping_1_1_1_1": json.dumps(
+            [{"ts": p["ts"], "target": primary_t, "rtt_ms": p["rtt"]} for p in last_p1_samples],
+            indent=2,
+        ),
+        "ping_8_8_4_4": json.dumps(
+            [{"ts": p["ts"], "target": secondary_t, "rtt_ms": p["rtt"]} for p in last_p2_samples],
+            indent=2,
+        ),
+        "radio_shannon": json.dumps(last_radio or {}, indent=2, ensure_ascii=False),
+        "net_egress": json.dumps({
+            "iface": last_net["iface"] if last_net else "rmnet0",
+            "ip_local": last_net["ip_local"] if last_net else None,
+            "ip_public": last_pub["ip_public"] if last_pub else None,
+            "ip_public_checked_ts": last_pub["ts"] if last_pub else None,
+            "public_ips_24h": distinct_pub_24h,
+            "last_public_change": last_pub_change,
+        }, indent=2, ensure_ascii=False),
+        "gps_location": json.dumps(last_gps or {}, indent=2, ensure_ascii=False),
+        "device_sysfs": json.dumps(dict(drow) if drow else {}, indent=2, ensure_ascii=False),
+    }
+
+    collectors = [
+        {"id": f"icmp_{primary_t}", "mode": "stream 1 Hz", "interval": "1 s", "status": f"ok · {len(p1_list)} pkts", "on": len(p1_list) > 0, "raw_key": "ping_1_1_1_1"},
+        {"id": f"icmp_{secondary_t or '8.8.4.4'}", "mode": "stream 1 Hz", "interval": "1 s", "status": f"ok · {len(p2_list)} pkts", "on": len(p2_list) > 0, "raw_key": "ping_8_8_4_4"},
+        {"id": "telephony_registry", "mode": "periodic", "interval": "5 s", "status": f"ok · {len(radio_list)} leituras", "on": last_radio is not None, "raw_key": "radio_shannon"},
+        {"id": "net_egress_dual_ip", "mode": "periodic+on_change", "interval": "5 s / 60 s", "status": f"ok · {last_pub['ip_public'] if last_pub else '--'}", "on": last_net is not None, "raw_key": "net_egress"},
+        {"id": "gnss_location", "mode": "periodic", "interval": "30 s", "status": f"ok · ±{int(last_gps['accuracy_m'])} m" if (last_gps and last_gps.get("accuracy_m")) else "sem fix", "on": last_gps is not None, "raw_key": "gps_location"},
+        {"id": "battery_thermal", "mode": "periodic", "interval": "60 s", "status": f"ok · {drow['temp_c']} °C" if (drow and drow["temp_c"]) else "ok", "on": drow is not None, "raw_key": "device_sysfs"},
+    ]
+
+    sample_age_s = round(now - ref_end, 1)
+    uptime_s = round(now - first_b["first_seen"]) if (first_b and first_b["first_seen"]) else 0
+
+    return {
+        "status": "online" if sample_age_s <= 120 else ("syncing" if (last_b and now - last_b["received_at"] <= 150) else "offline"),
+        "server_time": now,
+        "ref_end": ref_end,
+        "sample_age_s": sample_age_s,
+        "window_s": window_s,
+        "step_s": step_s,
+        "device_id": dev,
+        "agent_version": last_b["agent_version"] if last_b else "3.0.0",
+        "clock_skew_s": round(last_b["received_at"] - last_b["sent_at"], 1) if (last_b and last_b["sent_at"]) else None,
+        "total_batches": first_b["total_batches"] if first_b else 0,
+        "uptime_s": uptime_s,
+        "primary_target": primary_t,
+        "secondary_target": secondary_t,
+        "kpis": {
+            "p50_warm": p50_warm,
+            "p95": p95_all,
+            "p99": p99_all,
+            "cold_count": len(cold_rtts),
+            "cold_delta_ms": cold_delta,
+            "dist": {"nominal_pct": b_nom, "elevated_pct": b_elev, "high_pct": b_high},
+        },
+        "targets_table": targets_table,
+        "timeline": timeline,
+        "radio": {
+            "current": last_radio,
+            "rsrp_min": min(rsrps_win) if rsrps_win else None,
+            "rsrp_max": max(rsrps_win) if rsrps_win else None,
+            "rsrq_min": min(rsrqs_win) if rsrqs_win else None,
+            "rsrq_max": max(rsrqs_win) if rsrqs_win else None,
+            "sinr_min": min(sinrs_win) if sinrs_win else None,
+            "sinr_max": max(sinrs_win) if sinrs_win else None,
+            "cells_observed": cells_observed,
+        },
+        "network": {
+            "iface": last_net["iface"] if last_net else "rmnet0",
+            "ip_local": last_net["ip_local"] if last_net else None,
+            "ip_public": last_pub["ip_public"] if last_pub else None,
+            "ip_public_ts": last_pub["ts"] if last_pub else None,
+            "public_ips_24h": distinct_pub_24h,
+            "last_public_change": last_pub_change,
+        },
+        "gps": {
+            "current": last_gps,
+            "fix_age_s": round(now - last_gps["fix_ts"], 1) if (last_gps and last_gps.get("fix_ts")) else None,
+            "trail": gps_points,
+        },
+        "device": dict(drow) if drow else None,
+        "events": corr_events[:35],
+        "collectors": collectors,
+        "raw_samples": raw_samples,
+    }
+
+
+@app.get("/api/v3/export.csv", response_class=PlainTextResponse)
+async def export_csv(device_id: Optional[str] = None, minutes: int = Query(60, ge=1, le=1440)):
+    """Exporta CSV consolidado segundo a segundo dos pings cruzados com radio e IP."""
+    conn = get_db()
+    try:
+        dev = resolve_device(conn, device_id)
+        if not dev:
+            return "ts,target,seq,rtt_ms,rat,ca,band,pci,rsrp,rsrq,sinr,ta,ip_local,ip_public\n"
+        since = time.time() - minutes * 60
+        prows = conn.execute(
+            "SELECT ts, target, seq, rtt FROM ping_samples WHERE device_id=? AND ts > ? ORDER BY ts",
+            (dev, since),
+        ).fetchall()
+        rrows = conn.execute(
+            "SELECT * FROM radio_samples WHERE device_id=? AND ts > ? ORDER BY ts",
+            (dev, since - 30),
+        ).fetchall()
+        nrows = conn.execute(
+            "SELECT * FROM network_samples WHERE device_id=? AND ts > ? ORDER BY ts",
+            (dev, since - 3600),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    rlist = [radio_row(r) for r in rrows]
+    pub_ip = next((r["ip_public"] for r in reversed(nrows) if r["ip_public"]), "")
+    loc_ip = next((r["ip_local"] for r in reversed(nrows) if r["ip_local"]), "")
+
+    lines = ["ts_epoch,target,seq,rtt_ms,rat,ca,band,pci,rsrp_dbm,rsrq_db,sinr_db,ta,ip_local,ip_public"]
+    ri = 0
+    rlen = len(rlist)
+    for p in prows:
+        while ri + 1 < rlen and rlist[ri + 1]["ts"] <= p["ts"]:
+            ri += 1
+        cr = rlist[ri] if rlen else {}
+        lines.append(
+            f"{p['ts']},{p['target']},{p['seq']},{p['rtt'] if p['rtt'] is not None else ''},"
+            f"{cr.get('rat','')},{cr.get('ca','')},{cr.get('band','')},{cr.get('pci','')},"
+            f"{cr.get('rsrp','')},{cr.get('rsrq','')},{cr.get('rssnr','')},{cr.get('ta','')},"
+            f"{loc_ip},{pub_ip}"
+        )
+    return PlainTextResponse(
+        "\n".join(lines) + "\n",
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="celldiag_{dev}_{minutes}m.csv"'},
+    )
 
 
 @app.get("/api/status")
