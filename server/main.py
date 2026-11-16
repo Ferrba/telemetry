@@ -221,12 +221,12 @@ def resolve_device(conn: sqlite3.Connection, device_id: Optional[str]) -> Option
 def dedupe_pings(rows) -> Dict[str, List[Dict[str, Any]]]:
     """
     Um mesmo pacote (target, run, seq) pode aparecer duas vezes: 'sem resposta'
-    e depois uma resposta atrasada. O pacote conta como recebido se houver
-    qualquer resposta. Retorna {target: [ {ts, rtt}, ... ] ordenado por ts}.
+    e depois uma resposta atrasada. Inclui a janela de meia hora para evitar
+    colisao quando o icmp_seq de 16 bits (0..65535) reinicia apos 18,2 horas.
     """
     pk: Dict[tuple, Dict[str, Any]] = {}
     for r in rows:
-        key = (r["target"], r["run"], r["seq"])
+        key = (r["target"], r["run"], int(r["ts"] // 1800), r["seq"])
         cur = pk.get(key)
         if cur is None:
             pk[key] = {"ts": r["ts"], "rtt": r["rtt"]}

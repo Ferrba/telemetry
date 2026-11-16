@@ -485,7 +485,8 @@ async function renderSummary() {
       setText('tech-header', tech);
       setText('carrier-tag', r.operator || 'MÓVEL');
       setText('radio-sub', `${tech} · leitura ${ago(now - r.ts)}`);
-      setText('band-pci', `${r.band || '--'} · PCI ${isNum(r.pci) ? r.pci : '--'}`);
+      const shortBand = (r.band || '--').replace(' MHz', '');
+      setText('band-pci', `${shortBand} · PCI ${isNum(r.pci) ? r.pci : '--'}`);
       setText('distance-ta', isNum(r.distance_m) ? `~${r.distance_m} m (TA=${r.ta})` : '--');
 
       const info = rsrpInfo(r.rsrp);
@@ -521,7 +522,7 @@ async function renderSummary() {
 
     const d = s.device;
     if (d) {
-      const chg = { Charging: 'Carregando', Full: 'Carga completa', Discharging: 'Na bateria', 'Not charging': 'Fonte conectada' }[d.charging] || d.charging || '--';
+      const chg = { Charging: 'Carregando', Full: 'Completa', Discharging: 'Bateria', 'Not charging': 'Fonte' }[d.charging] || d.charging || '--';
       setText('batt-volt', `${isNum(d.battery_pct) ? d.battery_pct + '%' : '--'} (${isNum(d.voltage_v) ? d.voltage_v.toFixed(2) + ' V' : '--'})`);
       setText('temp-chg', `${fmt(d.temp_c)} °C · ${chg}`);
     }
@@ -605,14 +606,15 @@ async function renderTable() {
     const hoFlag = m.handover ? ' <span class="state-badge state-warn">HANDOVER</span>' : '';
     const snrStr = isNum(m.rssnr_avg) ? ` / ${m.rssnr_avg >= 0 ? '+' : ''}${m.rssnr_avg} dB` : '';
 
+    const shortBand = (m.band || '--').replace(' MHz', '');
     return `<tr>
       <td><strong>${hhmm(m.t)}</strong></td>
       <td><span class="state-badge ${stateClass(m.worst_status)}">${m.worst_status}</span></td>
       ${renderTargetCells(m.targets[t1])}
       ${renderTargetCells(m.targets[t2])}
-      <td class="col-sep-left">${isNum(m.rsrp_avg) ? m.rsrp_avg : '--'} <span class="td-muted">(mín ${isNum(m.rsrp_min) ? m.rsrp_min : '--'}) dBm</span></td>
+      <td class="col-sep-left">${isNum(m.rsrp_avg) ? m.rsrp_avg : '--'} / <span class="td-muted">${isNum(m.rsrp_min) ? m.rsrp_min : '--'} dBm</span></td>
       <td>${isNum(m.rsrq_avg) ? m.rsrq_avg + ' dB' : '--'}${snrStr}</td>
-      <td>${m.band || '--'} · ${pciStr}${hoFlag} · <span class="td-muted">${isNum(m.distance_m) ? '~' + m.distance_m + 'm' : '--'}</span></td>
+      <td>${shortBand} · ${pciStr}${hoFlag} · <span class="td-muted">${isNum(m.distance_m) ? '~' + m.distance_m + 'm' : '--'}</span></td>
       <td class="col-sep-left">${pub}${pubFlag}</td>
       <td>${loc}</td>
     </tr>`;
