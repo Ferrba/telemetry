@@ -127,16 +127,12 @@ local_ip() {
 
 check_public_ip() {
     # Roda em segundo plano para nao atrasar o ciclo de 5s.
-    # Consulta primeiro o proprio servidor na AWS (IP direto, sem depender de DNS na rmnet0).
+    # Consulta o proprio servidor na AWS (IP direto, sem depender de DNS na rmnet0).
     local now="$1" ipl="$2" trig="$3" pub base_url
     base_url="${SERVER_URL%/api/*}"
-    pub=$(curl -4 -s --interface "$IFACE" --max-time 4 "$base_url/api/v3/myip" 2>/dev/null | tr -d '\r\n ')
-    if ! [[ "$pub" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        pub=$(curl -4 -s --interface "$IFACE" --max-time 4 http://checkip.amazonaws.com 2>/dev/null | tr -d '\r\n ')
-    fi
+    pub=$(curl -4 -s --interface "$IFACE" --connect-timeout 3 --max-time 5 "$base_url/api/v3/myip" 2>/dev/null | tr -d '\r\n ')
     [[ "$pub" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || pub=""
     emit network "{\"ts\":$now,\"iface\":\"$IFACE\",\"ip_local\":$(js "$ipl"),\"ip_public\":$(js "$pub"),\"pub_checked\":true,\"trigger\":\"$trig\"}"
-    [ -z "$pub" ] && log collector "IP publico sera inferido pelo servidor no envio do lote (trigger=$trig)"
 }
 
 collect_gps() {
@@ -265,18 +261,23 @@ prune_outbox() {
 }
 
 flush_outbox() {
-    # Envia do mais antigo para o mais novo; para no primeiro erro
-    local f code sent=0
-    for f in $(ls "$OUTBOX" 2>/dev/null | grep '^batch_.*\.json$' | sort | head -n 20); do
-        code=$(curl -4 -s --interface "$IFACE" -o "$WORK/resp.txt" -w '%{http_code}' --max-time 20 \
+    # Envia do MAIS RECENTE para o mais antigo (sort -r) para que o painel em
+    # tempo real esteja sempre atualizado no minuto corrente, e drena a fila
+    # acumulada logo em seguida sem abortar no primeiro timeout pontual.
+    local f code sent=0 fails=0
+    for f in $(ls "$OUTBOX" 2>/dev/null | grep '^batch_.*\.json$' | sort -r | head -n 30); do
+        rm -f "$WORK/resp.txt"
+        code=$(curl -4 -s --interface "$IFACE" -o "$WORK/resp.txt" -w '%{http_code}' \
+               --connect-timeout 4 --max-time 10 --retry 2 --retry-delay 1 \
                -H "Content-Type: application/json" -H "X-Sent-At: $(date +%s)" \
                --data-binary "@$OUTBOX/$f" "$SERVER_URL" 2>/dev/null)
-        if [ "$code" = "200" ] && grep -q '"status":"ok"' "$WORK/resp.txt"; then
+        if [ "$code" = "200" ] && grep -q '"status":"ok"' "$WORK/resp.txt" 2>/dev/null; then
             rm -f "$OUTBOX/$f"
             sent=$((sent + 1))
         else
-            log sender "falha ao enviar $f (HTTP ${code:-000}): $(head -c 200 "$WORK/resp.txt" 2>/dev/null)"
-            break
+            fails=$((fails + 1))
+            log sender "falha ao enviar $f (HTTP ${code:-000}): $(head -c 160 "$WORK/resp.txt" 2>/dev/null)"
+            [ "$fails" -ge 3 ] && break
         fi
     done
     local left
@@ -354,6 +355,7 @@ case "$1" in
     stop)       do_stop; echo "Agente parado." ;;
     restart)    do_stop; do_start ;;
     status)     do_status ;;
+    flush)      flush_outbox; do_status ;;
     log)        tail -n 50 -f "$LOG" ;;
-    *)          echo "Uso: $0 start|stop|restart|status|log" ;;
+    *)          echo "Uso: $0 start|stop|restart|status|flush|log" ;;
 esac

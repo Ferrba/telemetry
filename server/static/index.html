@@ -3,224 +3,372 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>CellDiag Telemetry - Painel de Observabilidade Celular</title>
+  <title>CellDiag Telemetry · Monitoramento 4G/LTE &amp; Latência</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/static/styles.css?v=3.0.0">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/styles.css?v=3.1.0">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 </head>
 <body>
-  <div class="dashboard-container">
-    <header class="dashboard-header">
-      <div class="header-left">
-        <div class="brand-logo">
-          <span class="logo-icon">&#9889;</span>
-          <div class="brand-text">
-            <h1>CELLDIAG <span class="accent-badge">TELEMETRY</span></h1>
-            <p class="subtitle">Observabilidade de Radiofrequência e Latência Móvel (4G/LTE)</p>
+  <div class="app-shell">
+    <!-- Barra Superior Compacta: Identidade, Status de Sincronismo e Seletor de Janela -->
+    <header class="topbar">
+      <div class="topbar-brand">
+        <div class="brand-mark" aria-hidden="true">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M2 20h.01"/><path d="M7 20v-4"/><path d="M12 20v-8"/><path d="M17 20V8"/><path d="M22 4v16"/>
+          </svg>
+        </div>
+        <div>
+          <div class="brand-title-row">
+            <h1 class="brand-title">CellDiag Telemetry</h1>
+            <span class="version-pill">v3.1</span>
           </div>
+          <p class="brand-subtitle">Monitoramento Contínuo de Latência ICMP, Rádio 4G/LTE e Auditoria de Saída IP</p>
         </div>
       </div>
-      <div class="header-right">
-        <div class="device-pill">
-          <span class="device-icon">&#128241;</span>
-          <span id="device-id">--</span>
-          <span class="carrier-tag" id="carrier-tag">--</span>
-          <span class="tech-tag badge-purple" id="tech-header">--</span>
+
+      <div class="topbar-controls">
+        <div class="device-chip" title="Dispositivo e operadora">
+          <span class="chip-label">Sonda</span>
+          <strong id="device-id">--</strong>
+          <span class="chip-sep">·</span>
+          <span class="carrier-badge" id="carrier-tag">--</span>
+          <span class="tech-badge" id="tech-header">--</span>
         </div>
-        <div class="status-indicator" id="status-indicator">
-          <span class="pulse-dot"></span>
-          <span id="connection-status">Aguardando dados...</span>
+
+        <div class="status-chip" id="status-indicator">
+          <span class="status-dot"></span>
+          <span id="connection-status">Conectando...</span>
         </div>
-        <button id="refresh-btn" class="refresh-button" title="Atualizar agora">
-          <span class="icon">&#8635;</span>
+
+        <div class="period-segmented" role="group" aria-label="Janela de tempo dos gráficos">
+          <button type="button" class="seg-btn" data-range="live">Ao vivo (1/s · 10m)</button>
+          <button type="button" class="seg-btn active" data-range="60">1 hora</button>
+          <button type="button" class="seg-btn" data-range="360">6 horas</button>
+          <button type="button" class="seg-btn" data-range="1440">24 horas</button>
+        </div>
+
+        <button type="button" id="refresh-btn" class="icon-btn" title="Atualizar dados agora" aria-label="Atualizar dados agora">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/>
+          </svg>
         </button>
       </div>
     </header>
 
-    <section class="kpi-grid">
-      <div class="kpi-card">
-        <div class="kpi-header">
-          <span class="kpi-label">LATÊNCIA (ÚLTIMO MINUTO)</span>
-          <span class="kpi-badge badge-green" id="lat-status">--</span>
+    <!-- Painel de Resumo Operacional: 4 Blocos Claros com Todas as Submétricas Rotuladas -->
+    <section class="summary-grid" aria-label="Resumo do último minuto">
+      <!-- Bloco 1: Latência Alvo 1 -->
+      <article class="metric-panel" id="panel-target-1">
+        <div class="panel-head">
+          <div>
+            <span class="panel-title">LATÊNCIA · ALVO 1</span>
+            <span class="panel-target-ip" id="t1-ip">1.1.1.1 (Cloudflare)</span>
+          </div>
+          <span class="state-badge state-neutral" id="t1-status">--</span>
         </div>
-        <div class="kpi-value-container">
-          <span class="kpi-value" id="lat-main">--</span>
-          <span class="kpi-unit">ms</span>
+        <div class="panel-hero">
+          <div class="hero-number-group">
+            <span class="hero-number" id="t1-avg">--</span>
+            <span class="hero-unit">ms (média 60s)</span>
+          </div>
         </div>
-        <div class="kpi-footer target-rows" id="lat-rows">--</div>
-      </div>
+        <dl class="kv-grid">
+          <div class="kv-item">
+            <dt>Mín / Máx</dt>
+            <dd id="t1-minmax">--</dd>
+          </div>
+          <div class="kv-item">
+            <dt>Percentil 95 (P95)</dt>
+            <dd id="t1-p95">--</dd>
+          </div>
+          <div class="kv-item">
+            <dt>Jitter (RFC 3550)</dt>
+            <dd id="t1-jitter">--</dd>
+          </div>
+          <div class="kv-item">
+            <dt>Perda (Rec/Env)</dt>
+            <dd id="t1-loss">--</dd>
+          </div>
+        </dl>
+      </article>
 
-      <div class="kpi-card">
-        <div class="kpi-header">
-          <span class="kpi-label">SINAL &amp; TECNOLOGIA</span>
-          <span class="kpi-badge badge-blue" id="rsrp-quality">--</span>
+      <!-- Bloco 2: Latência Alvo 2 -->
+      <article class="metric-panel" id="panel-target-2">
+        <div class="panel-head">
+          <div>
+            <span class="panel-title">LATÊNCIA · ALVO 2</span>
+            <span class="panel-target-ip" id="t2-ip">8.8.4.4 (Google DNS)</span>
+          </div>
+          <span class="state-badge state-neutral" id="t2-status">--</span>
         </div>
-        <div class="kpi-value-container">
-          <span class="kpi-value" id="rsrp">--</span>
-          <span class="kpi-unit">dBm</span>
+        <div class="panel-hero">
+          <div class="hero-number-group">
+            <span class="hero-number" id="t2-avg">--</span>
+            <span class="hero-unit">ms (média 60s)</span>
+          </div>
         </div>
-        <div class="kpi-footer">
-          RSRQ <strong id="rsrq">--</strong> · SNR <strong id="rssnr">--</strong><br>
-          <strong id="tech-card">--</strong> · <strong id="band">--</strong> · PCI <strong id="pci">--</strong>
-        </div>
-      </div>
+        <dl class="kv-grid">
+          <div class="kv-item">
+            <dt>Mín / Máx</dt>
+            <dd id="t2-minmax">--</dd>
+          </div>
+          <div class="kv-item">
+            <dt>Percentil 95 (P95)</dt>
+            <dd id="t2-p95">--</dd>
+          </div>
+          <div class="kv-item">
+            <dt>Jitter (RFC 3550)</dt>
+            <dd id="t2-jitter">--</dd>
+          </div>
+          <div class="kv-item">
+            <dt>Perda (Rec/Env)</dt>
+            <dd id="t2-loss">--</dd>
+          </div>
+        </dl>
+      </article>
 
-      <div class="kpi-card">
-        <div class="kpi-header">
-          <span class="kpi-label">DISTÂNCIA DA TORRE (TA)</span>
-          <span class="kpi-badge badge-purple" id="ta-badge">TA --</span>
+      <!-- Bloco 3: Rádio & Célula Servidora -->
+      <article class="metric-panel">
+        <div class="panel-head">
+          <div>
+            <span class="panel-title">RÁDIO &amp; CÉLULA SERVIDORA</span>
+            <span class="panel-target-ip" id="radio-sub">Amostragem a cada 5s</span>
+          </div>
+          <span class="state-badge state-neutral" id="rsrp-quality">--</span>
         </div>
-        <div class="kpi-value-container">
-          <span class="kpi-value" id="distance">--</span>
-          <span class="kpi-unit">m</span>
+        <div class="panel-hero">
+          <div class="hero-number-group">
+            <span class="hero-number" id="rsrp">--</span>
+            <span class="hero-unit">dBm (RSRP)</span>
+          </div>
+          <div class="signal-meter" aria-hidden="true">
+            <div class="signal-meter-fill" id="rsrp-bar"></div>
+          </div>
         </div>
-        <div class="kpi-footer">
-          Leitura de rádio: <strong id="radio-age">--</strong>
-        </div>
-      </div>
+        <dl class="kv-grid">
+          <div class="kv-item">
+            <dt>Qualidade (RSRQ)</dt>
+            <dd id="rsrq">--</dd>
+          </div>
+          <div class="kv-item">
+            <dt>Relação Ruído (SINR)</dt>
+            <dd id="rssnr">--</dd>
+          </div>
+          <div class="kv-item">
+            <dt>Banda / Setor PCI</dt>
+            <dd id="band-pci">--</dd>
+          </div>
+          <div class="kv-item">
+            <dt>Distância Torre (TA)</dt>
+            <dd id="distance-ta">--</dd>
+          </div>
+        </dl>
+      </article>
 
-      <div class="kpi-card">
-        <div class="kpi-header">
-          <span class="kpi-label">IP PÚBLICO (SAÍDA DE TRÁFEGO)</span>
-          <span class="kpi-badge badge-cyan" id="ip-badge">--</span>
+      <!-- Bloco 4: Saída de Rede (Dual IP) & Aparelho -->
+      <article class="metric-panel">
+        <div class="panel-head">
+          <div>
+            <span class="panel-title">SAÍDA DE TRÁFEGO &amp; SONDA</span>
+            <span class="panel-target-ip">Auditoria Dual IP Público</span>
+          </div>
+          <span class="state-badge state-info" id="ip-badge">--</span>
         </div>
-        <div class="kpi-value-container">
-          <span class="kpi-value ip-text" id="ip-public">--</span>
+        <div class="panel-hero">
+          <div class="hero-number-group">
+            <span class="hero-number hero-ip" id="ip-public">--</span>
+            <span class="hero-unit">IP público ativo</span>
+          </div>
         </div>
-        <div class="kpi-footer">
-          IP móvel (<span id="iface">rmnet0</span>): <strong id="ip-local">--</strong><br>
-          IPs públicos em 24h: <strong id="ip-count">--</strong>
-        </div>
-      </div>
-
-      <div class="kpi-card">
-        <div class="kpi-header">
-          <span class="kpi-label">TEMPERATURA &amp; BATERIA</span>
-          <span class="kpi-badge badge-yellow" id="batt-badge">--</span>
-        </div>
-        <div class="kpi-value-container">
-          <span class="kpi-value" id="temp">--</span>
-          <span class="kpi-unit">°C</span>
-        </div>
-        <div class="kpi-footer">
-          Tensão: <strong id="volt">--</strong> · <strong id="charging">--</strong>
-        </div>
-      </div>
+        <dl class="kv-grid">
+          <div class="kv-item">
+            <dt>IP Móvel (<span id="iface">rmnet0</span>)</dt>
+            <dd id="ip-local">--</dd>
+          </div>
+          <div class="kv-item">
+            <dt>IPs Públicos (24h)</dt>
+            <dd id="ip-count">--</dd>
+          </div>
+          <div class="kv-item">
+            <dt>Bateria / Tensão</dt>
+            <dd id="batt-volt">--</dd>
+          </div>
+          <div class="kv-item">
+            <dt>Temperatura / Fonte</dt>
+            <dd id="temp-chg">--</dd>
+          </div>
+        </dl>
+      </article>
     </section>
 
-    <div class="range-bar">
-      <span class="range-label">Período dos gráficos:</span>
-      <button class="range-btn" data-range="live">Ao vivo (10 min, 1/s)</button>
-      <button class="range-btn active" data-range="60">1 h</button>
-      <button class="range-btn" data-range="360">6 h</button>
-      <button class="range-btn" data-range="1440">24 h</button>
-    </div>
-
-    <section class="charts-grid">
-      <div class="chart-card">
-        <div class="chart-header">
-          <div class="chart-title-group">
-            <h3>Histórico de Latência de Enlace (RTT)</h3>
-            <span class="chart-desc" id="latency-desc">Média por minuto, por alvo</span>
+    <!-- Área Analítica Principal: Pilha Temporal Sincronizada (Esquerda) + Mapa e Auditoria (Direita) -->
+    <section class="workspace-grid">
+      <!-- Coluna Esquerda: Séries Temporais Alinhadas no Tempo -->
+      <div class="timeseries-stack">
+        <!-- Gráfico 1: Latência RTT -->
+        <div class="surface-card">
+          <div class="card-head">
+            <div>
+              <h2>Curva de Latência ICMP (RTT)</h2>
+              <p class="card-subtitle" id="latency-desc">Comparativo entre alvos no mesmo eixo temporal</p>
+            </div>
+            <div class="legend-inline" id="latency-legend"></div>
           </div>
-          <div class="chart-filters" id="latency-legend"></div>
+          <div class="chart-wrap chart-wrap-latency">
+            <canvas id="latencyChart"></canvas>
+            <div class="chart-empty" id="latency-empty">Aguardando amostras de ping para o período...</div>
+          </div>
         </div>
-        <div class="chart-body">
-          <canvas id="latencyChart"></canvas>
-          <div class="chart-empty" id="latency-empty">Sem amostras de ping no período</div>
+
+        <!-- Gráfico 2: Rádio separado em Potência (RSRP) e Qualidade (SINR / RSRQ) sem sobreposição -->
+        <div class="surface-card">
+          <div class="card-head">
+            <div>
+              <h2>Sinal Celular e Qualidade de Rádio (4G/LTE)</h2>
+              <p class="card-subtitle">Potência RSRP (dBm) separada de SINR e RSRQ (dB) para leitura limpa sem cruzamento de escalas</p>
+            </div>
+            <div class="legend-inline">
+              <span class="legend-item"><i class="swatch swatch-emerald"></i>RSRP (dBm)</span>
+              <span class="legend-item"><i class="swatch swatch-sky"></i>SINR (dB)</span>
+              <span class="legend-item"><i class="swatch swatch-amber"></i>RSRQ (dB)</span>
+            </div>
+          </div>
+          <div class="rf-dual-charts">
+            <div class="rf-subchart">
+              <div class="subchart-label">Potência Recebida · RSRP (dBm) <span class="subchart-hint">Bom ≥ -95 dBm · Fraco &lt; -105 dBm</span></div>
+              <div class="chart-wrap chart-wrap-rf">
+                <canvas id="rsrpChart"></canvas>
+              </div>
+            </div>
+            <div class="rf-subchart">
+              <div class="subchart-label">Relação Sinal-Ruído · SINR (dB) &amp; Qualidade · RSRQ (dB) <span class="subchart-hint">SINR bom ≥ 10 dB · RSRQ bom ≥ -10 dB</span></div>
+              <div class="chart-wrap chart-wrap-rf">
+                <canvas id="sinrChart"></canvas>
+              </div>
+            </div>
+            <div class="chart-empty" id="rf-empty">Aguardando leituras de rádio para o período...</div>
+          </div>
         </div>
       </div>
 
-      <div class="chart-card map-card">
-        <div class="chart-header">
-          <div class="chart-title-group">
-            <h3>Georreferenciamento &amp; Cobertura da Célula</h3>
-            <span class="chart-desc">Última posição conhecida e raio estimado pelo Timing Advance</span>
+      <!-- Coluna Direita: Mapa Georreferenciado Inline + Auditoria de Rota e Handover -->
+      <aside class="side-stack">
+        <!-- Mapa Inline -->
+        <div class="surface-card">
+          <div class="card-head">
+            <div>
+              <h2>Posição Geográfica &amp; Raio da Célula</h2>
+              <p class="card-subtitle">Localização do dispositivo e raio estimado pelo Timing Advance (TA)</p>
+            </div>
+            <span class="state-badge state-info" id="gps-provider">--</span>
           </div>
-          <div class="chart-filters">
-            <span class="kpi-badge badge-purple" id="gps-provider">--</span>
-            <span class="kpi-badge badge-cyan" id="gps-acc">--</span>
-          </div>
+          <div id="inline-map-canvas" class="map-canvas"></div>
+          <dl class="map-meta-grid">
+            <div>
+              <dt>Latitude, Longitude</dt>
+              <dd id="gps-coords">--</dd>
+            </div>
+            <div>
+              <dt>Precisão Horizontal</dt>
+              <dd id="gps-acc">--</dd>
+            </div>
+            <div>
+              <dt>Raio Estimado (TA)</dt>
+              <dd id="gps-ta">--</dd>
+            </div>
+            <div>
+              <dt>Atualização do Fix</dt>
+              <dd id="gps-age">--</dd>
+            </div>
+          </dl>
         </div>
-        <div class="chart-body map-chart-body">
-          <div id="inline-map-canvas" class="inline-map-view"></div>
-          <div class="inline-map-bar">
-            <span>Lat, Lon: <strong id="gps-coords">--</strong></span>
-            <span>Fix: <strong id="gps-age">--</strong></span>
-            <span>Raio TA: <strong id="gps-ta">--</strong></span>
-          </div>
-        </div>
-      </div>
 
-      <div class="chart-card">
-        <div class="chart-header">
-          <div class="chart-title-group">
-            <h3>Qualidade de Radiofrequência (RSRP / RSRQ / SNR)</h3>
-            <span class="chart-desc">Leituras a cada 5 segundos</span>
+        <!-- Auditoria de Eventos (Troca de IP Público / Handover de Antena) -->
+        <div class="surface-card">
+          <div class="card-head">
+            <div>
+              <h2>Auditoria de Rota &amp; Troca de Antena</h2>
+              <p class="card-subtitle">Mudanças de IP público (Dual Egress), IP móvel e handover de célula (PCI)</p>
+            </div>
+            <span class="state-badge state-neutral" id="events-count-badge">0 eventos</span>
           </div>
-        </div>
-        <div class="chart-body">
-          <canvas id="rfChart"></canvas>
-          <div class="chart-empty" id="rf-empty">Sem leituras de rádio no período</div>
-        </div>
-      </div>
-
-      <div class="chart-card">
-        <div class="chart-header">
-          <div class="chart-title-group">
-            <h3>Eventos de Rede</h3>
-            <span class="chart-desc">Trocas de IP público/local e troca de célula (handover) no período</span>
+          <div class="active-route-banner" id="active-route-banner">
+            <div class="route-node">
+              <span class="route-node-label">Interface Móvel</span>
+              <strong id="route-local">--</strong>
+            </div>
+            <span class="route-arrow">→</span>
+            <div class="route-node">
+              <span class="route-node-label">Saída Pública</span>
+              <strong id="route-public">--</strong>
+            </div>
+            <span class="route-arrow">·</span>
+            <div class="route-node">
+              <span class="route-node-label">Célula Ativa</span>
+              <strong id="route-cell">--</strong>
+            </div>
           </div>
-        </div>
-        <div class="chart-body events-body">
           <ul class="events-list" id="events-list">
-            <li class="event-empty">Nenhum evento no período</li>
+            <li class="event-empty">Nenhuma troca de IP público ou handover de antena registrada no período.</li>
           </ul>
         </div>
-      </div>
+      </aside>
     </section>
 
-    <section class="table-section">
-      <div class="table-header">
-        <h3>Resumo por Minuto (latência cruzada com rádio e rede)</h3>
-        <span class="auto-refresh-tag">Últimos 15 minutos · atualiza a cada 15s</span>
+    <!-- Tabela Consolidada Minuto a Minuto (1 Linha por Minuto, Sem Duplicação) -->
+    <section class="surface-card table-card">
+      <div class="card-head">
+        <div>
+          <h2>Histórico Consolidado Minuto a Minuto</h2>
+          <p class="card-subtitle">Uma linha por minuto cruzando simultaneamente os dois alvos de ping, as 12 leituras de rádio (5s) e o IP de saída</p>
+        </div>
+        <span class="table-meta-pill" id="table-summary-pill">Últimos 20 minutos · atualização automática</span>
       </div>
-      <div class="table-wrapper">
-        <table class="data-table">
+      <div class="table-scroll">
+        <table class="consolidated-table">
           <thead>
-            <tr>
-              <th>Minuto</th>
-              <th>Alvo</th>
-              <th>Latência méd (mín–máx)</th>
+            <tr class="th-group-row">
+              <th rowspan="2">Minuto</th>
+              <th rowspan="2">SLA</th>
+              <th colspan="3" class="th-group th-group-t1" id="th-t1-title">Alvo 1 · 1.1.1.1 (Cloudflare)</th>
+              <th colspan="3" class="th-group th-group-t2" id="th-t2-title">Alvo 2 · 8.8.4.4 (Google)</th>
+              <th colspan="3" class="th-group th-group-rf">Rádio 4G/LTE (12 amostras/min)</th>
+              <th colspan="2" class="th-group th-group-net">Rota de Saída</th>
+            </tr>
+            <tr class="th-sub-row">
+              <th class="col-sep-left">Média (Mín–Máx)</th>
               <th>Jitter</th>
-              <th>Perda</th>
-              <th>Status</th>
-              <th>RSRP méd / mín</th>
-              <th>RSRQ</th>
-              <th>Célula (PCI)</th>
-              <th>Banda</th>
-              <th>Distância</th>
-              <th>IP público</th>
-              <th>IP móvel</th>
+              <th>Perda (Rec/Env)</th>
+              <th class="col-sep-left">Média (Mín–Máx)</th>
+              <th>Jitter</th>
+              <th>Perda (Rec/Env)</th>
+              <th class="col-sep-left">RSRP Méd / Mín</th>
+              <th>RSRQ / SINR</th>
+              <th>Banda · PCI · Dist</th>
+              <th class="col-sep-left">IP Público</th>
+              <th>IP Móvel</th>
             </tr>
           </thead>
           <tbody id="table-body">
-            <tr><td colspan="13" class="empty-row">Aguardando o primeiro lote do celular...</td></tr>
+            <tr>
+              <td colspan="13" class="empty-row">Carregando histórico consolidado...</td>
+            </tr>
           </tbody>
         </table>
       </div>
     </section>
 
-    <footer class="dashboard-footer">
-      <p>CellDiag Telemetry Hub v3 · agente <span id="agent-version">--</span></p>
-      <p class="server-status">Relógio celular × servidor: <code id="clock-skew">--</code> · Ingestão: <code>/api/v3/ingest</code></p>
+    <footer class="app-footer">
+      <span>CellDiag Telemetry Hub v3.1 · Agente de borda <strong id="agent-version">--</strong></span>
+      <span>Diferença de relógio (celular × servidor): <code id="clock-skew">--</code> · Endpoint: <code>/api/v3/ingest</code></span>
     </footer>
   </div>
 
-  <script src="/static/app.js?v=3.0.0"></script>
+  <script src="/static/app.js?v=3.1.0"></script>
 </body>
 </html>

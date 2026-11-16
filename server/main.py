@@ -497,12 +497,25 @@ async def summary(device_id: Optional[str] = None, window_s: int = Query(60, ge=
         last_public_change = next((e for e in reversed(events) if e["type"] == "TROCA_IP_PUBLICO"), None)
         distinct_public = sorted({r["ip_public"] for r in net_24h if r["ip_public"]})
 
+        r_ts = radio["ts"] if radio else 0
+        p_ts = last_ping or 0
+        last_sample_ts = max(r_ts, p_ts) or None
+        sample_age_s = round(now - last_sample_ts, 1) if last_sample_ts else None
+        if sample_age_s is not None and sample_age_s < 120:
+            dev_status = "online"
+        elif last_seen and now - last_seen < 150:
+            dev_status = "syncing"
+        else:
+            dev_status = "offline"
+
         return {
-            "status": "online" if last_seen and now - last_seen < 150 else "offline",
+            "status": dev_status,
             "device_id": dev,
             "agent_version": b["agent_version"] if b else None,
             "server_time": now,
             "last_seen": last_seen,
+            "last_sample_ts": last_sample_ts,
+            "sample_age_s": sample_age_s,
             "clock_skew_s": clock_skew,
             "latency_window_s": window_s,
             "latency": latency,
@@ -635,12 +648,12 @@ async def events(device_id: Optional[str] = None, minutes: int = Query(1440, ge=
 
 @app.get("/api/v3/table")
 async def minute_table(device_id: Optional[str] = None, minutes: int = Query(15, ge=1, le=240)):
-    """Uma linha por minuto e por alvo, cruzando latencia com radio e rede do mesmo minuto."""
+    """Retorna tanto linhas por (minuto, alvo) quanto minutos consolidados (1 linha por minuto com todos os alvos)."""
     conn = get_db()
     try:
         dev = resolve_device(conn, device_id)
         if not dev:
-            return {"rows": []}
+            return {"rows": [], "minutes": [], "targets": []}
         since = time.time() - minutes * 60
         prow = conn.execute(
             "SELECT ts, target, run, seq, rtt FROM ping_samples WHERE device_id=? AND ts > ? ORDER BY ts",
@@ -651,7 +664,7 @@ async def minute_table(device_id: Optional[str] = None, minutes: int = Query(15,
         ).fetchall()
         nrow = conn.execute(
             "SELECT ts, ip_local, ip_public FROM network_samples WHERE device_id=? AND ts > ? ORDER BY ts",
-            (dev, since - 600),
+            (dev, since - 3600),
         ).fetchall()
     finally:
         conn.close()
@@ -664,25 +677,42 @@ async def minute_table(device_id: Optional[str] = None, minutes: int = Query(15,
         net_by_min[int(n["ts"] // 60 * 60)].append(n)
     change_minutes = {int(e["ts"] // 60 * 60) for e in route_transitions(nrow) if e["type"] == "TROCA_IP_PUBLICO"}
 
+    # Propaga o ultimo IP publico e local conhecidos para que nenhum minuto fique vazio
+    known_pub: Optional[str] = None
+    known_loc: Optional[str] = None
+    for n in nrow:
+        if n["ip_public"]:
+            known_pub = n["ip_public"]
+        if n["ip_local"]:
+            known_loc = n["ip_local"]
+
+    deduped = dedupe_pings(prow)
+    targets_sorted = sorted(deduped.keys())
+    by_min_target: Dict[int, Dict[str, Dict[str, Any]]] = defaultdict(dict)
     out = []
-    for target, pkts in dedupe_pings(prow).items():
+
+    for target, pkts in deduped.items():
         buckets: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
         for p in pkts:
             buckets[int(p["ts"] // 60 * 60)].append(p)
         for t, bp in buckets.items():
+            st = stats_for(bp)
+            by_min_target[t][target] = st
             rs = radio_by_min.get(t, [])
             rsrps = [x["rsrp"] for x in rs if x["rsrp"] is not None]
             rsrqs = [x["rsrq"] for x in rs if x["rsrq"] is not None]
+            snrs = [x["rssnr"] for x in rs if x["rssnr"] is not None]
             pcis = sorted({x["pci"] for x in rs if x["pci"] is not None})
             ns = net_by_min.get(t, [])
-            pubs = sorted({x["ip_public"] for x in ns if x["ip_public"]})
-            locs = sorted({x["ip_local"] for x in ns if x["ip_local"]})
+            pubs = sorted({x["ip_public"] for x in ns if x["ip_public"]}) or ([known_pub] if known_pub else [])
+            locs = sorted({x["ip_local"] for x in ns if x["ip_local"]}) or ([known_loc] if known_loc else [])
             last_r = rs[-1] if rs else None
             out.append({
-                "t": t, "target": target, **stats_for(bp),
+                "t": t, "target": target, **st,
                 "rsrp_avg": round(sum(rsrps) / len(rsrps), 1) if rsrps else None,
                 "rsrp_min": min(rsrps) if rsrps else None,
                 "rsrq_avg": round(sum(rsrqs) / len(rsrqs), 1) if rsrqs else None,
+                "rssnr_avg": round(sum(snrs) / len(snrs), 1) if snrs else None,
                 "radio_samples": len(rs),
                 "pcis": pcis,
                 "handover": len(pcis) > 1,
@@ -690,12 +720,51 @@ async def minute_table(device_id: Optional[str] = None, minutes: int = Query(15,
                 "rat": last_r["rat"] if last_r else None,
                 "ca": last_r["ca"] if last_r else None,
                 "distance_m": last_r["distance_m"] if last_r else None,
+                "ta": last_r["ta"] if last_r else None,
                 "ip_public": pubs,
                 "ip_local": locs,
                 "public_ip_changed": t in change_minutes,
             })
+
     out.sort(key=lambda x: (-x["t"], x["target"]))
-    return {"device_id": dev, "rows": out}
+
+    status_rank = ["FALHA_TOTAL", "CRITICO", "DEGRADADO", "ATENCAO", "OK", "SEM_DADOS"]
+    minutes_consolidated = []
+    for t in sorted(by_min_target.keys(), reverse=True):
+        tmap = by_min_target[t]
+        statuses = [v["status"] for v in tmap.values()]
+        worst = next((s for s in status_rank if s in statuses), "OK")
+        rs = radio_by_min.get(t, [])
+        rsrps = [x["rsrp"] for x in rs if x["rsrp"] is not None]
+        rsrqs = [x["rsrq"] for x in rs if x["rsrq"] is not None]
+        snrs = [x["rssnr"] for x in rs if x["rssnr"] is not None]
+        pcis = sorted({x["pci"] for x in rs if x["pci"] is not None})
+        ns = net_by_min.get(t, [])
+        pubs = sorted({x["ip_public"] for x in ns if x["ip_public"]}) or ([known_pub] if known_pub else [])
+        locs = sorted({x["ip_local"] for x in ns if x["ip_local"]}) or ([known_loc] if known_loc else [])
+        last_r = rs[-1] if rs else None
+        minutes_consolidated.append({
+            "t": t,
+            "worst_status": worst,
+            "targets": tmap,
+            "rsrp_avg": round(sum(rsrps) / len(rsrps), 1) if rsrps else None,
+            "rsrp_min": min(rsrps) if rsrps else None,
+            "rsrq_avg": round(sum(rsrqs) / len(rsrqs), 1) if rsrqs else None,
+            "rssnr_avg": round(sum(snrs) / len(snrs), 1) if snrs else None,
+            "radio_samples": len(rs),
+            "pcis": pcis,
+            "handover": len(pcis) > 1,
+            "band": last_r["band"] if last_r else None,
+            "rat": last_r["rat"] if last_r else None,
+            "ca": last_r["ca"] if last_r else None,
+            "distance_m": last_r["distance_m"] if last_r else None,
+            "ta": last_r["ta"] if last_r else None,
+            "ip_public": pubs,
+            "ip_local": locs,
+            "public_ip_changed": t in change_minutes,
+        })
+
+    return {"device_id": dev, "targets": targets_sorted, "minutes": minutes_consolidated, "rows": out}
 
 
 @app.get("/api/status")
