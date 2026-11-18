@@ -21,6 +21,11 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+try:
+    from iot import create_iot_router
+except ImportError:
+    from server.iot import create_iot_router
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.environ.get("CELLDIAG_DB", os.path.join(BASE_DIR, "telemetry.db"))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
@@ -38,6 +43,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(create_iot_router(DB_PATH))
 
 
 # ==============================================================================
@@ -1246,6 +1252,7 @@ if os.path.exists(STATIC_DIR):
 
 
 @app.get("/")
+@app.get("/iot")
 async def serve_index():
     index_file = os.path.join(STATIC_DIR, "index.html")
     if os.path.exists(index_file):

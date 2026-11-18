@@ -9,7 +9,7 @@
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
-  <link rel="stylesheet" href="/static/styles.css?v=4.0.0">
+  <link rel="stylesheet" href="/static/styles.css?v=4.1.0">
 </head>
 <body class="theme-dark">
 
@@ -24,7 +24,10 @@
         </svg>
         <span class="logo-text">grafenomonitor</span>
       </div>
-      <div class="header-tag">Latência &amp; Geolocalização</div>
+      <div class="btn-group panel-switcher" role="tablist" aria-label="Selecionar painel">
+        <button type="button" class="btn-toggle active" data-panel="s10" id="tabBtnS10">Sonda S10</button>
+        <button type="button" class="btn-toggle" data-panel="iot" id="tabBtnIot">IoT · DevKit</button>
+      </div>
       <div class="device-pill" id="devPill">
         <span class="status-dot online" id="statusDot"></span>
         <span class="device-name" id="devName">Samsung Galaxy S10</span>
@@ -57,8 +60,8 @@
     </div>
   </header>
 
-  <!-- MAIN CONTAINER -->
-  <main class="dashboard-wrap">
+  <!-- MAIN CONTAINER: SONDA S10 -->
+  <main class="dashboard-wrap" id="panelS10">
 
     <!-- KPI STRIP -->
     <section class="kpi-grid">
@@ -283,9 +286,237 @@
 
   </main>
 
+  <!-- MAIN CONTAINER: PAINEL IOT (DEVKIT / BG95-M3) -->
+  <main class="dashboard-wrap" id="panelIot" style="display: none;">
+
+    <!-- BARRA DE CONTROLE IOT -->
+    <section class="panel iot-toolbar-panel">
+      <div class="iot-toolbar-left">
+        <label class="iot-field-label" for="iotDeviceSelect">Dispositivo IoT:</label>
+        <select id="iotDeviceSelect" class="iot-select">
+          <option value="">Mais recente (Auto)</option>
+        </select>
+        <span class="table-info-tag" id="iotDeviceSummaryTag">Aguardando envio do DevKit...</span>
+      </div>
+      <div class="iot-toolbar-right">
+        <div class="iot-endpoint-pill" title="Endpoint HTTP(S) POST para configurar no MORSE">
+          <span class="iot-ep-lbl">POST:</span>
+          <code id="iotEndpointUrl">/api/v3/iot/telemetry</code>
+          <button type="button" class="btn btn-sm btn-outline" id="btnIotCopyUrl">Copiar URL</button>
+        </div>
+        <button type="button" class="btn btn-sm btn-outline" id="btnIotRefresh">Atualizar</button>
+        <button type="button" class="btn btn-sm btn-outline" id="btnIotExport">Exportar JSON</button>
+        <button type="button" class="btn btn-sm btn-danger-outline" id="btnIotClear">Limpar</button>
+      </div>
+    </section>
+
+    <!-- KPI STRIP IOT -->
+    <section class="kpi-grid">
+      <div class="kpi-card">
+        <div class="kpi-header">
+          <span class="kpi-title">Latência ICMP &amp; Push HTTP</span>
+          <span class="badge badge-info" id="iotBadgeLatency">Aguardando</span>
+        </div>
+        <div class="kpi-hero">
+          <span class="hero-val" id="iotValPingAvg">--</span>
+          <span class="hero-unit">ms</span>
+        </div>
+        <div class="kpi-subline">
+          <span>Min/Max: <strong id="iotValPingMinMax">-- / -- ms</strong></span>
+          <span class="sub-sep">·</span>
+          <span>Perda: <strong id="iotValLoss">--%</strong></span>
+        </div>
+        <div class="kpi-foot">
+          <span>GET Health: <b id="iotValHttpHealth">-- ms</b></span>
+          <span>Últ. POST: <b id="iotValLastPost">-- ms</b></span>
+        </div>
+      </div>
+
+      <div class="kpi-card">
+        <div class="kpi-header">
+          <span class="kpi-title">Rádio &amp; Célula (BG95-M3)</span>
+          <span class="badge badge-info" id="iotBadgeSignal">--</span>
+        </div>
+        <div class="kpi-hero">
+          <span class="hero-val" id="iotValRsrp">--</span>
+          <span class="hero-unit">dBm</span>
+        </div>
+        <div class="kpi-subline">
+          <span id="iotValRatBand">--</span>
+          <span class="sub-sep">·</span>
+          <span>SINR: <strong id="iotValSinr">-- dB</strong></span>
+        </div>
+        <div class="kpi-foot">
+          <span>Cell ID: <b id="iotValCellId">--</b></span>
+          <span>CE: <b id="iotValCeLevel">--</b></span>
+        </div>
+      </div>
+
+      <div class="kpi-card">
+        <div class="kpi-header">
+          <span class="kpi-title">Saída Celular &amp; Hardware</span>
+          <span class="badge badge-info" id="iotBadgeHardware">CGNAT</span>
+        </div>
+        <div class="kpi-hero coords">
+          <span class="hero-coords" id="iotValPublicIp">--</span>
+        </div>
+        <div class="kpi-subline">
+          <span>IP APN: <strong id="iotValLocalIp">--</strong></span>
+          <span class="sub-sep">·</span>
+          <span id="iotValApn">--</span>
+        </div>
+        <div class="kpi-foot">
+          <span>VBAT: <b id="iotValVbat">-- mV</b></span>
+          <span>Temp: <b id="iotValTemp">-- °C</b></span>
+        </div>
+      </div>
+
+      <div class="kpi-card">
+        <div class="kpi-header">
+          <span class="kpi-title">Mensagem &amp; GNSS (DevKit)</span>
+          <span class="badge badge-info" id="iotBadgePacket">Seq --</span>
+        </div>
+        <div class="kpi-hero coords">
+          <span class="hero-coords iot-note-preview" id="iotValNote">Aguardando pacote...</span>
+        </div>
+        <div class="kpi-subline">
+          <span>FW: <strong id="iotValFw">--</strong></span>
+          <span class="sub-sep">·</span>
+          <span>Payload: <strong id="iotValBytes">-- B</strong></span>
+        </div>
+        <div class="kpi-foot">
+          <span>GNSS: <b id="iotValGnss">--</b></span>
+          <span>Sats: <b id="iotValSats">--</b></span>
+        </div>
+      </div>
+    </section>
+
+    <!-- SPLIT: MAPA GNSS IOT + GRÁFICO LATÊNCIA / RSRP -->
+    <section class="split-view">
+      <div class="panel map-panel">
+        <div class="panel-header">
+          <div class="panel-title-wrap">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6"></polygon>
+              <line x1="8" y1="2" x2="8" y2="18"></line>
+              <line x1="16" y1="6" x2="16" y2="22"></line>
+            </svg>
+            <h2>Localização GNSS do DevKit</h2>
+          </div>
+          <div class="map-actions">
+            <button class="btn btn-sm btn-outline" id="btnIotFitMap" type="button">Ajustar</button>
+            <button class="btn btn-sm btn-primary" id="btnIotCenterMap" type="button">Centralizar</button>
+          </div>
+        </div>
+        <div class="map-container-wrap">
+          <div id="iotMap" class="telemetry-map"></div>
+          <div class="map-overlay-info">
+            <span id="iotMapOverlay">Aguardando coordenadas GNSS...</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel latency-panel">
+        <div class="panel-header">
+          <div class="panel-title-wrap">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
+            </svg>
+            <h2>Série Temporal · Latência ICMP (ms) &amp; RSRP (dBm)</h2>
+          </div>
+          <div class="target-selectors">
+            <span class="target-chip active"><i class="color-indicator color-cobalt"></i><span>Ping Médio (ms)</span></span>
+            <span class="target-chip active"><i class="color-indicator color-violet"></i><span>RSRP (dBm)</span></span>
+          </div>
+        </div>
+        <div class="chart-readout-bar" id="iotChartReadout">
+          <span>Passe o cursor sobre o gráfico para inspecionar cada ciclo do DevKit</span>
+        </div>
+        <div class="chart-canvas-container">
+          <canvas id="iotChartCanvas"></canvas>
+        </div>
+        <div class="latency-dist-strip">
+          <div class="dist-stat-col">
+            <span class="dist-lbl">Ping Médio (Janela)</span>
+            <span class="dist-num" id="iotStatPingAvg">-- ms</span>
+          </div>
+          <div class="dist-stat-col">
+            <span class="dist-lbl">Ping Mín / Máx</span>
+            <span class="dist-num" id="iotStatPingMinMax">-- / --</span>
+          </div>
+          <div class="dist-stat-col">
+            <span class="dist-lbl">RSRP Médio</span>
+            <span class="dist-num" id="iotStatRsrpAvg">-- dBm</span>
+          </div>
+          <div class="dist-stat-col">
+            <span class="dist-lbl">POST Médio</span>
+            <span class="dist-num" id="iotStatPostAvg">-- ms</span>
+          </div>
+          <div class="dist-stat-col">
+            <span class="dist-lbl">Pacotes Totais</span>
+            <span class="dist-num" id="iotStatTotal">0</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TABELA DE PACOTES IOT -->
+    <section class="panel history-panel">
+      <div class="panel-header">
+        <div class="panel-title-wrap">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"></circle>
+            <polyline points="12 6 12 12 16 14"></polyline>
+          </svg>
+          <h2>Pacotes Recebidos do DevKit (BG95-M3 / MORSE)</h2>
+        </div>
+        <div class="history-actions">
+          <span class="table-info-tag" id="iotTableCountTag">0 pacotes</span>
+        </div>
+      </div>
+
+      <div class="table-container">
+        <table class="simple-table" id="iotTable">
+          <thead>
+            <tr>
+              <th>Recebido</th>
+              <th class="text-right">Seq</th>
+              <th>Device / FW</th>
+              <th>RAT · Banda · Cell ID</th>
+              <th class="text-right">RSRP / SINR</th>
+              <th class="text-right">Ping / Perda</th>
+              <th class="text-right">POST ant.</th>
+              <th>IP Público (CGNAT) / APN</th>
+              <th class="text-right">VBAT / Temp</th>
+              <th>Texto / Nota</th>
+              <th class="text-center">JSON</th>
+            </tr>
+          </thead>
+          <tbody id="iotTableBody">
+            <tr>
+              <td colspan="11" class="table-empty">Nenhum pacote IoT recebido ainda.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- MODAL: INSPEÇÃO DO PAYLOAD BRUTO IOT -->
+  <div id="iotPayloadModal" class="iot-modal-backdrop" style="display: none;">
+    <div class="iot-modal-card">
+      <div class="iot-modal-header">
+        <h3 id="iotModalTitle">Payload JSON do Pacote</h3>
+        <button type="button" class="btn btn-sm btn-outline" id="btnIotCloseModal">Fechar</button>
+      </div>
+      <pre id="iotModalPre" class="iot-modal-pre"></pre>
+    </div>
+  </div>
+
   <footer class="app-footer">
     <div class="footer-left">
-      <span>grafenomonitor · Versão Simplificada (Latência &amp; Geolocalização)</span>
+      <span>grafenomonitor · Telemetria Móvel &amp; IoT</span>
       <span class="footer-sep">·</span>
       <span id="footerProbeDetails">Sonda S10 · Ingestão 1 Hz ICMP</span>
     </div>
@@ -294,6 +525,7 @@
     </div>
   </footer>
 
-  <script src="/static/app.js?v=4.0.0"></script>
+  <script src="/static/app.js?v=4.1.0"></script>
+  <script src="/static/iot.js?v=4.1.0"></script>
 </body>
 </html>

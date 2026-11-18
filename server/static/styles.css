@@ -828,3 +828,135 @@ body.theme-dark .telemetry-map .leaflet-tile {
     padding: 12px 14px;
   }
 }
+
+/* PAINEL IOT (DEVKIT BG95-M3) */
+.panel-switcher .btn-toggle.active {
+  color: var(--cobalt);
+}
+
+.iot-toolbar-panel {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  flex-wrap: wrap;
+}
+
+.iot-toolbar-left,
+.iot-toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.iot-field-label {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.iot-select {
+  background-color: var(--bg-surface-elevated);
+  color: var(--text-main);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 5px 10px;
+  font-size: 12.5px;
+  font-family: var(--font-mono);
+}
+
+.iot-endpoint-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background-color: var(--bg-surface-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
+.iot-ep-lbl {
+  font-weight: 700;
+  color: var(--success);
+}
+
+.iot-endpoint-pill code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-main);
+}
+
+.btn-danger-outline {
+  background-color: var(--bg-surface);
+  border-color: var(--border);
+  color: var(--danger);
+}
+
+.btn-danger-outline:hover {
+  background-color: var(--danger-subtle);
+  border-color: var(--danger);
+}
+
+.iot-note-preview {
+  font-size: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+  display: block;
+}
+
+.iot-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2000;
+  padding: 20px;
+}
+
+.iot-modal-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  max-width: 720px;
+  width: 100%;
+  max-height: 82vh;
+  display: flex;
+  flex-direction: column;
+  padding: 16px;
+  gap: 12px;
+}
+
+.iot-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.iot-modal-header h3 {
+  font-size: 15px;
+  color: var(--text-main);
+}
+
+.iot-modal-pre {
+  margin: 0;
+  padding: 12px;
+  background: var(--bg-app);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-main);
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

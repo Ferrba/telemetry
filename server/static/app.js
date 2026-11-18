@@ -126,6 +126,7 @@
       el.themeIcon.textContent = '🌙';
     }
     renderCanvas();
+    window.dispatchEvent(new CustomEvent('gm:theme-change', { detail: theme }));
   }
 
   function toggleTheme() {
@@ -305,12 +306,15 @@
   // --- ATUALIZAÇÃO DOS KPIS PRINCIPAIS ---
   function updateSummaryKPIs(s) {
     if (!s) return;
+    const isIotActive = window.gmActivePanel === 'iot';
 
     // Dispositivo & Rede
-    if (s.device_id) el.devName.textContent = s.device_id.replace(/_/g, ' ');
-    if (s.radio && s.radio.rat) {
-      const band = s.radio.band ? s.radio.band.split(' ')[0] : '';
-      el.devNet.textContent = `${s.radio.rat}${band ? ' ' + band : ''}`;
+    if (!isIotActive) {
+      if (s.device_id) el.devName.textContent = s.device_id.replace(/_/g, ' ');
+      if (s.radio && s.radio.rat) {
+        const band = s.radio.band ? s.radio.band.split(' ')[0] : '';
+        el.devNet.textContent = `${s.radio.rat}${band ? ' ' + band : ''}`;
+      }
     }
 
     // Alvos de Latência
@@ -430,10 +434,13 @@
       el.valBattery.textContent = `${s.device.battery_pct}%`;
     }
 
-    el.footerProbeDetails.textContent = `Sonda: ${s.device_id || 'S10'} · Status: ${s.status} · Amostra há ${s.sample_age_s ? s.sample_age_s + 's' : '--'}`;
+    if (!window.gmActivePanel || window.gmActivePanel === 's10') {
+      el.footerProbeDetails.textContent = `Sonda: ${s.device_id || 'S10'} · Status: ${s.status} · Amostra há ${s.sample_age_s ? s.sample_age_s + 's' : '--'}`;
+    }
   }
 
   function updateStatusBadge(s) {
+    if (window.gmActivePanel === 'iot') return;
     if (!s) {
       el.statusDot.className = 'status-dot offline';
       return;
