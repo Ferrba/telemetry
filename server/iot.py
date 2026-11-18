@@ -5,7 +5,7 @@ import json
 import os
 import sqlite3
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
@@ -109,23 +109,10 @@ def _safe_str(val: Any) -> Optional[str]:
     return s if s else None
 
 
-def _extract_client_egress(request: Request) -> Tuple[str, Optional[int]]:
-    forwarded = (
-        request.headers.get("cf-connecting-ip")
-        or request.headers.get("x-forwarded-for")
-        or request.headers.get("x-real-ip")
-    )
-    direct_host = request.client.host if request.client else "unknown"
-    direct_port = request.client.port if request.client else None
-    if forwarded:
-        ip_public = forwarded.split(",")[0].strip() or direct_host
-    else:
-        ip_public = direct_host
-    return ip_public, direct_port
-
-
 def _row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
     d = dict(row)
+    d.pop("ip_public", None)
+    d.pop("source_port", None)
     d["payload_json"] = json.loads(d["payload_json"])
     return d
 
@@ -135,14 +122,11 @@ def create_iot_router(db_path: str) -> APIRouter:
     router = APIRouter(prefix="/api/v3/iot", tags=["IoT Telemetry"])
 
     @router.get("/health")
-    async def iot_health(request: Request) -> Dict[str, Any]:
-        ip_public, source_port = _extract_client_egress(request)
+    async def iot_health() -> Dict[str, Any]:
         return {
             "ok": True,
             "service": "celldiag-iot-hub",
             "server_time": time.time(),
-            "ip_public": ip_public,
-            "source_port": source_port,
         }
 
     @router.post("/telemetry")
@@ -167,7 +151,6 @@ def create_iot_router(db_path: str) -> APIRouter:
         timings = payload.get("timings_ms") if isinstance(payload.get("timings_ms"), dict) else {}
 
         received_at = time.time()
-        ip_public, source_port = _extract_client_egress(request)
         bytes_received = len(raw_bytes)
         device_id = (
             _safe_str(device.get("imei"))
@@ -224,8 +207,8 @@ def create_iot_router(db_path: str) -> APIRouter:
                     _safe_int(radio.get("rssi_dbm")),
                     _safe_str(network.get("apn")),
                     _safe_str(network.get("ip_local")),
-                    ip_public,
-                    source_port,
+                    None,
+                    None,
                     _safe_str(latency.get("ping_target")),
                     _safe_int(latency.get("ping_sent")),
                     _safe_int(latency.get("ping_rcvd")),
@@ -264,8 +247,6 @@ def create_iot_router(db_path: str) -> APIRouter:
             "seq": seq,
             "device_id": device_id,
             "server_ts": received_at,
-            "ip_public": ip_public,
-            "source_port": source_port,
             "bytes_received": bytes_received,
             "echo_note": note,
         }
@@ -288,7 +269,7 @@ def create_iot_router(db_path: str) -> APIRouter:
             devices = []
             for r in rows:
                 latest = conn.execute(
-                    "SELECT model, fw, rat, band, ip_public FROM iot_telemetry WHERE device_id=? ORDER BY id DESC LIMIT 1",
+                    "SELECT model, fw, rat, band FROM iot_telemetry WHERE device_id=? ORDER BY id DESC LIMIT 1",
                     (r["device_id"],),
                 ).fetchone()
                 devices.append(
@@ -300,7 +281,6 @@ def create_iot_router(db_path: str) -> APIRouter:
                         "fw": latest["fw"] if latest else None,
                         "rat": latest["rat"] if latest else None,
                         "band": latest["band"] if latest else None,
-                        "ip_public": latest["ip_public"] if latest else None,
                     }
                 )
             return {"devices": devices}
@@ -356,7 +336,6 @@ def create_iot_router(db_path: str) -> APIRouter:
         losses = [r["ping_loss_pct"] for r in win_rows if r["ping_loss_pct"] is not None]
         rsrps = [r["rsrp"] for r in win_rows if r["rsrp"] is not None]
         posts = [r["last_post_ms"] for r in win_rows if r["last_post_ms"] is not None]
-        pub_ips = sorted({r["ip_public"] for r in win_rows if r["ip_public"]})
 
         return {
             "status": dev_status,
@@ -375,7 +354,6 @@ def create_iot_router(db_path: str) -> APIRouter:
                 "rsrp_min_dbm": min(rsrps) if rsrps else None,
                 "rsrp_max_dbm": max(rsrps) if rsrps else None,
                 "post_avg_ms": round(sum(posts) / len(posts), 1) if posts else None,
-                "public_ips_window": pub_ips,
             },
         }
 

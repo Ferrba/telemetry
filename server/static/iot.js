@@ -51,10 +51,10 @@
     valCellId: document.getElementById('iotValCellId'),
     valCeLevel: document.getElementById('iotValCeLevel'),
 
-    valPublicIp: document.getElementById('iotValPublicIp'),
     badgeHardware: document.getElementById('iotBadgeHardware'),
     valLocalIp: document.getElementById('iotValLocalIp'),
     valApn: document.getElementById('iotValApn'),
+    valPlmn: document.getElementById('iotValPlmn'),
     valVbat: document.getElementById('iotValVbat'),
     valTemp: document.getElementById('iotValTemp'),
 
@@ -331,7 +331,9 @@
       if (dom.badgeLatency) { dom.badgeLatency.className = 'badge badge-info'; dom.badgeLatency.textContent = 'Aguardando'; }
       if (dom.valPingAvg) dom.valPingAvg.textContent = '--';
       if (dom.valRsrp) dom.valRsrp.textContent = '--';
-      if (dom.valPublicIp) dom.valPublicIp.textContent = '--';
+      if (dom.valLocalIp) dom.valLocalIp.textContent = '--';
+      if (dom.valApn) dom.valApn.textContent = '--';
+      if (dom.valPlmn) dom.valPlmn.textContent = '--';
       if (dom.valNote) dom.valNote.textContent = 'Aguardando pacote...';
       if (dom.statusDot) dom.statusDot.className = 'status-dot offline';
       if (dom.liveStatus) dom.liveStatus.textContent = 'Aguardando IoT';
@@ -348,13 +350,16 @@
     if (dom.summaryTag) dom.summaryTag.textContent = `${s.total_packets} pacotes · último há ${s.age_s}s`;
     if (dom.footerProbeDetails) dom.footerProbeDetails.textContent = `IoT: ${r.device_id} · ${r.rat || '--'} ${r.band || ''} · Último pacote há ${s.age_s}s`;
 
-    // KPI 1: Latência
+    // KPI 1: Latência (LPWA NB-IoT tem RTT naturalmente maior que LTE tradicional)
+    const isNb = String(r.rat || '').toUpperCase().includes('NB');
+    const warnMs = isNb ? 280 : 120;
+    const critMs = isNb ? 550 : 250;
     if (r.ping_avg_ms !== null && r.ping_avg_ms !== undefined) {
       dom.valPingAvg.textContent = r.ping_avg_ms;
-      if (r.ping_avg_ms <= 120 && (r.ping_loss_pct || 0) === 0) {
+      if (r.ping_avg_ms <= warnMs && (r.ping_loss_pct || 0) === 0) {
         dom.badgeLatency.className = 'badge badge-success';
         dom.badgeLatency.textContent = 'Estável';
-      } else if (r.ping_avg_ms <= 250 && (r.ping_loss_pct || 0) <= 25) {
+      } else if (r.ping_avg_ms <= critMs && (r.ping_loss_pct || 0) <= 25) {
         dom.badgeLatency.className = 'badge badge-warning';
         dom.badgeLatency.textContent = 'Atenção';
       } else {
@@ -387,10 +392,10 @@
     dom.valCellId.textContent = r.cell_id || '--';
     dom.valCeLevel.textContent = r.ce_level !== null && r.ce_level !== undefined ? String(r.ce_level) : '--';
 
-    // KPI 3: Saída & Hardware
-    dom.valPublicIp.textContent = r.ip_public ? `${r.ip_public}${r.source_port ? ':' + r.source_port : ''}` : '--';
+    // KPI 3: Rede Celular & Hardware
     dom.valLocalIp.textContent = r.ip_local || '--';
     dom.valApn.textContent = r.apn || '--';
+    if (dom.valPlmn) dom.valPlmn.textContent = r.plmn || '--';
     dom.valVbat.textContent = r.vbat_mv !== null && r.vbat_mv !== undefined ? `${r.vbat_mv} mV` : '-- mV';
     dom.valTemp.textContent = r.temp_c !== null && r.temp_c !== undefined ? `${r.temp_c} °C` : '-- °C';
 
@@ -400,12 +405,13 @@
     dom.valNote.title = r.note || '';
     dom.valFw.textContent = r.fw || '--';
     dom.valBytes.textContent = `${r.bytes_received ?? 0} B`;
+    const isSimGnss = Boolean(r.payload_json && r.payload_json.network && r.payload_json.network.gnss && r.payload_json.network.gnss.simulated);
     if (r.lat !== null && r.lat !== undefined && r.lon !== null && r.lon !== undefined) {
-      dom.valGnss.textContent = `${r.lat.toFixed(5)}, ${r.lon.toFixed(5)}`;
+      dom.valGnss.textContent = `${r.lat.toFixed(5)}, ${r.lon.toFixed(5)}${isSimGnss ? ' (sim)' : ''}`;
     } else {
       dom.valGnss.textContent = 'Sem fix GNSS';
     }
-    dom.valSats.textContent = r.sats !== null && r.sats !== undefined ? String(r.sats) : '--';
+    dom.valSats.textContent = isSimGnss ? 'Simulado' : (r.sats !== null && r.sats !== undefined ? String(r.sats) : '--');
 
     // Stats strip
     dom.statPingAvg.textContent = st.ping_avg_ms !== null && st.ping_avg_ms !== undefined ? `${st.ping_avg_ms} ms` : '-- ms';
@@ -615,7 +621,7 @@
           <td class="td-mono text-right">${esc(r.rsrp ?? '--')} dBm<br><small style="color:var(--text-muted)">SINR ${esc(r.rssnr ?? '--')}</small></td>
           <td class="text-right">${pingPill}<br><small style="color:var(--text-muted)">loss ${esc(lossTxt)}</small></td>
           <td class="td-mono text-right">${r.last_post_ms !== null && r.last_post_ms !== undefined ? r.last_post_ms + ' ms' : '--'}</td>
-          <td class="td-mono">${esc(r.ip_public || '--')}${r.source_port ? ':' + r.source_port : ''}<br><small style="color:var(--text-muted)">${esc(r.apn || '--')}</small></td>
+          <td class="td-mono">${esc(r.ip_local || '--')}<br><small style="color:var(--text-muted)">${esc([r.apn, r.plmn].filter(Boolean).join(' · ') || '--')}</small></td>
           <td class="td-mono text-right">${esc(r.vbat_mv ?? '--')} mV<br><small style="color:var(--text-muted)">${esc(r.temp_c ?? '--')} °C</small></td>
           <td>${esc(r.note || '--')}</td>
           <td class="text-center"><button type="button" class="btn btn-sm btn-outline" data-iot-json="${idx}">Ver JSON</button></td>

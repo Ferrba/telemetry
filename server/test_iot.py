@@ -90,7 +90,8 @@ class CellDiagIotTests(unittest.TestCase):
         ack = res.json()
         self.assertTrue(ack["ok"])
         self.assertEqual(ack["device_id"], "864475040009999")
-        self.assertEqual(ack["ip_public"], "187.55.10.20")
+        self.assertNotIn("ip_public", ack)
+        self.assertNotIn("source_port", ack)
         self.assertEqual(ack["echo_note"], "Teste campo BG95")
 
         # BG95 text/plain fallback
@@ -104,17 +105,21 @@ class CellDiagIotTests(unittest.TestCase):
         devs = self.client.get("/api/v3/iot/devices").json()["devices"]
         self.assertEqual(len(devs), 1)
         self.assertEqual(devs[0]["total_packets"], 2)
+        self.assertNotIn("ip_public", devs[0])
 
         summary = self.client.get("/api/v3/iot/summary").json()
         self.assertEqual(summary["status"], "online")
         self.assertEqual(summary["device_id"], "864475040009999")
         self.assertEqual(summary["stats"]["ping_avg_ms"], 180.0)
         self.assertEqual(summary["stats"]["rsrp_avg_dbm"], -92.0)
+        self.assertNotIn("ip_public", summary["latest"])
 
         items = self.client.get("/api/v3/iot/telemetry?limit=10").json()
         self.assertEqual(len(items), 2)
         self.assertEqual(items[0]["seq"], 4)
         self.assertEqual(items[1]["lat"], -29.68)
+        self.assertNotIn("ip_public", items[0])
+        self.assertNotIn("source_port", items[0])
 
         cleared = self.client.delete("/api/v3/iot/telemetry").json()
         self.assertEqual(cleared["deleted"], 2)

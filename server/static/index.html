@@ -9,7 +9,7 @@
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
-  <link rel="stylesheet" href="/static/styles.css?v=4.1.0">
+  <link rel="stylesheet" href="/static/styles.css?v=4.2.0">
 </head>
 <body class="theme-dark">
 
@@ -354,16 +354,16 @@
 
       <div class="kpi-card">
         <div class="kpi-header">
-          <span class="kpi-title">Saída Celular &amp; Hardware</span>
-          <span class="badge badge-info" id="iotBadgeHardware">CGNAT</span>
+          <span class="kpi-title">Rede Celular &amp; Hardware</span>
+          <span class="badge badge-info" id="iotBadgeHardware">PDP</span>
         </div>
         <div class="kpi-hero coords">
-          <span class="hero-coords" id="iotValPublicIp">--</span>
+          <span class="hero-coords" id="iotValLocalIp">--</span>
         </div>
         <div class="kpi-subline">
-          <span>IP APN: <strong id="iotValLocalIp">--</strong></span>
+          <span>APN: <strong id="iotValApn">--</strong></span>
           <span class="sub-sep">·</span>
-          <span id="iotValApn">--</span>
+          <span>PLMN: <strong id="iotValPlmn">--</strong></span>
         </div>
         <div class="kpi-foot">
           <span>VBAT: <b id="iotValVbat">-- mV</b></span>
@@ -486,7 +486,7 @@
               <th class="text-right">RSRP / SINR</th>
               <th class="text-right">Ping / Perda</th>
               <th class="text-right">POST ant.</th>
-              <th>IP Público (CGNAT) / APN</th>
+              <th>IP APN / Operadora</th>
               <th class="text-right">VBAT / Temp</th>
               <th>Texto / Nota</th>
               <th class="text-center">JSON</th>
@@ -525,7 +525,7 @@
     </div>
   </footer>
 
-  <script src="/static/app.js?v=4.1.0"></script>
-  <script src="/static/iot.js?v=4.1.0"></script>
+  <script src="/static/app.js?v=4.2.0"></script>
+  <script src="/static/iot.js?v=4.2.0"></script>
 </body>
 </html>
